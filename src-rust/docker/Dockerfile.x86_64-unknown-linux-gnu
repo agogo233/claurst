@@ -1,0 +1,33 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install --assume-yes --no-install-recommends \
+    autoconf \
+    automake \
+    binutils \
+    ca-certificates \
+    cmake \
+    curl \
+    file \
+    g++ \
+    g++-x86-64-linux-gnu \
+    gcc \
+    git \
+    libc6-dev \
+    libc6-dev-amd64-cross \
+    libclang-dev \
+    libtool \
+    m4 \
+    make \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CROSS_TOOLCHAIN_PREFIX=x86_64-linux-gnu-
+ENV CROSS_SYSROOT=/usr/x86_64-linux-gnu
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CROSS_TOOLCHAIN_PREFIX}gcc" \
+    AR_x86_64_unknown_linux_gnu="${CROSS_TOOLCHAIN_PREFIX}ar" \
+    CC_x86_64_unknown_linux_gnu="${CROSS_TOOLCHAIN_PREFIX}gcc" \
+    CXX_x86_64_unknown_linux_gnu="${CROSS_TOOLCHAIN_PREFIX}g++" \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu="--sysroot=${CROSS_SYSROOT} -idirafter/usr/include"

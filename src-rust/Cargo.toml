@@ -22,6 +22,9 @@ authors = ["Claurst"]
 license = "GPL-3.0"
 
 [workspace.dependencies]
+# TLS (vendored OpenSSL for cross-compilation compatibility)
+openssl = { version = "0.10", features = ["vendored"] }
+
 # Async runtime
 tokio = { version = "1.44", features = ["full"] }
 tokio-stream = "0.1"

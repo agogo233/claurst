@@ -1,0 +1,200 @@
+name: Headless Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: headless-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Preflight: validate branch, tag, and version match ──────────────
+  preflight:
+    runs-on: ubuntu-latest
+    name: Preflight checks
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Get version from Cargo.toml
+        id: get-version
+        run: |
+          VERSION=$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Must be on main branch
+        run: |
+          if [[ "${{ github.ref }}" != "refs/heads/main" ]]; then
+            echo "::error::Releases must be triggered from the main branch (got ${{ github.ref }})"
+            exit 1
+          fi
+
+      - name: Tag must not already exist
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${{ steps.get-version.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.get-version.outputs.version }} already exists"
+            exit 1
+          fi
+
+  # ── Build matrix: Linux musl + Windows MSVC + Windows MinGW ────────
+  build:
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: static-musl
+            target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            method: cross
+            ext: ""
+            archive_ext: ""
+            artifact: claurst-linux-x86_64-headless-musl
+
+          - name: windows-msvc
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            method: native
+            ext: ".exe"
+            archive_ext: .zip
+            artifact: claurst-windows-x86_64-headless-msvc
+
+          - name: windows-gnu
+            target: x86_64-pc-windows-gnu
+            os: windows-latest
+            method: native
+            ext: ".exe"
+            archive_ext: .zip
+            artifact: claurst-windows-x86_64-headless-gnu
+            mingw: true
+
+    name: Build ${{ matrix.name }}
+
+    steps:
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2.1.0
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 3
+
+      - uses: actions/checkout@v4.3.1
+
+      - name: Install Rust toolchain (cross)
+        if: matrix.method != 'native'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Windows Rust target
+        if: runner.os == 'Windows' && matrix.method == 'native'
+        shell: pwsh
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Setup MSYS2
+        if: matrix.mingw
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            perl
+
+      # 缓存
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5.0.1
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-rust/target
+          key: ${{ matrix.name }}-${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.name }}-${{ matrix.target }}-cargo-
+
+      # 安装 cross
+      - name: Install cross tool
+        if: matrix.method == 'cross'
+        run: cargo install cross --git https://github.com/cross-rs/cross.git
+
+      # 创建 Cross.toml 用于 cross 编译（musl 静态链接）
+      - name: Create Cross.toml (cross targets)
+        if: matrix.method == 'cross'
+        working-directory: src-rust
+        run: |
+          cat > Cross.toml <<EOF
+          [target.x86_64-unknown-linux-musl]
+          image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:edge"
+          EOF
+
+      - name: Build headless release (cross)
+        if: matrix.method == 'cross'
+        working-directory: src-rust
+        run: cross build --release --package claurst --target ${{ matrix.target }} --no-default-features
+
+      - name: Build headless release (native, msys2)
+        if: matrix.method == 'native' && matrix.mingw
+        shell: msys2 {0}
+        working-directory: src-rust
+        env:
+          CC: gcc
+          CXX: g++
+        run: cargo build --release --package claurst --target ${{ matrix.target }} --no-default-features
+
+      - name: Build headless release (native)
+        if: matrix.method == 'native' && !matrix.mingw
+        working-directory: src-rust
+        run: cargo build --release --package claurst --target ${{ matrix.target }} --no-default-features
+
+      # 验证二进制
+      - name: Verify binary exists
+        shell: bash
+        run: |
+          BINARY="src-rust/target/${{ matrix.target }}/release/claurst${{ matrix.ext }}"
+          if [[ ! -f "$BINARY" ]]; then
+            echo "::error::Binary not found at $BINARY"
+            exit 1
+          fi
+          ls -lh "$BINARY"
+          SIZE=$(wc -c < "$BINARY")
+          if [[ $SIZE -lt 10000 ]]; then
+            echo "::error::Binary seems too small ($SIZE bytes)"
+            exit 1
+          fi
+
+      # 打包：Windows → .zip（pwsh），Linux → 裸二进制
+      - name: Package artifact (zip)
+        if: matrix.archive_ext == '.zip'
+        shell: pwsh
+        run: |
+          mkdir dist -Force
+          Compress-Archive -Path "src-rust/target/${{ matrix.target }}/release/claurst${{ matrix.ext }}" -DestinationPath "dist/${{ matrix.artifact }}.zip"
+
+      - name: Package artifact (bare)
+        if: matrix.archive_ext == ''
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "src-rust/target/${{ matrix.target }}/release/claurst" \
+             "dist/${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}${{ matrix.archive_ext }}

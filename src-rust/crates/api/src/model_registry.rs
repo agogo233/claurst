@@ -1464,7 +1464,6 @@ mod tests {
             "model key must use opencode-zen prefix"
         );
     }
-
     // ---- experimental.modes expansion (opencode provider.ts:1247-1264) ----
 
     #[test]

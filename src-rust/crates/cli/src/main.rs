@@ -2653,6 +2653,71 @@ async fn run_interactive(
                                     app.kitty_keyboard_active =
                                         claurst_tui::keyboard_enhancement_active();
                                 }
+                                Some(CommandResult::StartLoginForProvider {
+                                    provider,
+                                    login_with_claude_ai,
+                                    label,
+                                }) => {
+                                    claurst_tui::restore_terminal(&mut terminal).ok();
+                                    if provider == claurst_core::accounts::PROVIDER_CODEX {
+                                        let (tx, mut rx) = tokio::sync::mpsc::channel::<
+                                            claurst_tui::DeviceAuthEvent,
+                                        >(8);
+                                        tokio::spawn(async move {
+                                            while let Some(evt) = rx.recv().await {
+                                                if let claurst_tui::DeviceAuthEvent::GotBrowserUrl {
+                                                    url,
+                                                } = evt
+                                                {
+                                                    eprintln!(
+                                                        "\nOpening browser for Codex \
+                                                         authentication...\nIf the browser \
+                                                         did not open, visit:\n\n  {}\n",
+                                                        url
+                                                    );
+                                                }
+                                            }
+                                        });
+                                        match crate::codex_oauth_flow::run_oauth_flow_with_label(
+                                            tx,
+                                            label.as_deref(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                app.status_message = Some(
+                                                    "Codex login successful!".to_string(),
+                                                );
+                                                eprintln!("\nCodex login successful!");
+                                                break 'main;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("\nCodex login failed: {}", e);
+                                            }
+                                        }
+                                    } else {
+                                        match oauth_flow::run_oauth_login_flow_with_label(
+                                            login_with_claude_ai,
+                                            label.as_deref(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                app.status_message =
+                                                    Some("Login successful!".to_string());
+                                                eprintln!(
+                                                    "\nLogin successful! Please restart \
+                                                     claurst to use the new credentials."
+                                                );
+                                                break 'main;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("\nLogin failed: {}", e);
+                                            }
+                                        }
+                                    }
+                                    terminal = claurst_tui::setup_terminal(app.config.mouse_capture_enabled())?;
+                                }
                                 Some(CommandResult::Error(e)) => {
                                     app.status_message = Some(format!("Error: {}", e));
                                 }
