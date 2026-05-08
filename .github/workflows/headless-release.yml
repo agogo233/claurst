@@ -1,0 +1,154 @@
+name: Headless Linux Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: headless-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Preflight: validate branch, tag, and version match ──────────────
+  preflight:
+    runs-on: ubuntu-latest
+    name: Preflight checks
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from Cargo.toml
+        id: get-version
+        run: |
+          VERSION=$(grep '^version' src-rust/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Must be on main branch
+        run: |
+          if [[ "${{ github.ref }}" != "refs/heads/main" ]]; then
+            echo "::error::Releases must be triggered from the main branch (got ${{ github.ref }})"
+            exit 1
+          fi
+
+      - name: Tag must not already exist
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${{ steps.get-version.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.get-version.outputs.version }} already exists"
+            exit 1
+          fi
+
+  # ── Build headless Linux binary (3 variants) ─────────────
+  build:
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: native-glibc
+            target: x86_64-unknown-linux-gnu
+            method: native
+            artifact: claurst-linux-x86_64-headless-glibc
+          - name: cross-glibc
+            target: x86_64-unknown-linux-gnu
+            method: cross
+            artifact: claurst-linux-x86_64-headless-cross
+          - name: static-musl
+            target: x86_64-unknown-linux-musl
+            method: cross
+            artifact: claurst-linux-x86_64-headless-musl
+    name: Build ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rust 工具链安装（按需）
+      - name: Install Rust toolchain (native)
+        if: matrix.method == 'native'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Rust toolchain (cross)
+        if: matrix.method != 'native'
+        uses: dtolnay/rust-toolchain@stable
+
+      # 系统依赖（vendored OpenSSL 已内嵌，native 构建无需额外安装）
+      - name: Install system dependencies (native only)
+        if: matrix.method == 'native'
+        run: echo "No system dependencies needed (vendored OpenSSL)"
+
+      # 缓存
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-rust/target
+          key: ${{ matrix.name }}-${{ matrix.target }}-cargo-${{ hashFiles('src-rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.name }}-${{ matrix.target }}-cargo-
+
+      # 安装 cross（需要时）
+      - name: Install cross tool
+        if: matrix.method == 'cross'
+        run: cargo install cross --git https://github.com/cross-rs/cross.git
+
+      # 创建 Cross.toml 用于 cross 编译（vendored OpenSSL 无需安装 libssl-dev）
+      - name: Create Cross.toml (cross targets)
+        if: matrix.method == 'cross'
+        working-directory: src-rust
+        run: |
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
+            printf '%s\n' '[target.x86_64-unknown-linux-musl]' 'image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:edge"' > Cross.toml
+          else
+            printf '%s\n' '[target.x86_64-unknown-linux-gnu]' 'image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:edge"' > Cross.toml
+          fi
+
+      - name: Build headless release binary (no default features)
+        working-directory: src-rust
+        run: |
+          if [[ "${{ matrix.method }}" == "native" ]]; then
+            cargo build --release --package claurst --target ${{ matrix.target }} --no-default-features
+          else
+            cross build --release --package claurst --target ${{ matrix.target }} --no-default-features
+          fi
+
+      # 验证二进制
+      - name: Verify binary exists
+        shell: bash
+        run: |
+          BINARY="src-rust/target/${{ matrix.target }}/release/claurst"
+          if [[ ! -f "$BINARY" ]]; then
+            echo "::error::Binary not found at $BINARY"
+            exit 1
+          fi
+          ls -lh "$BINARY"
+          # 验证文件大小（至少应该有一些 KB）
+          SIZE=$(stat -c%s "$BINARY")
+          if [[ $SIZE -lt 10000 ]]; then
+            echo "::error::Binary seems too small ($SIZE bytes)"
+            exit 1
+          fi
+
+      # 打包
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "src-rust/target/${{ matrix.target }}/release/claurst" \
+            "dist/${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
