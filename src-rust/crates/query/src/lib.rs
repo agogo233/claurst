@@ -12,6 +12,7 @@ pub mod agent_tool;
 pub mod auto_dream;
 pub mod away_summary;
 pub mod command_queue;
+pub mod goal_loop;
 pub mod managed_orchestrator;
 pub mod compact;
 pub mod context_analyzer;
@@ -22,6 +23,7 @@ pub mod skill_prefetch;
 pub use agent_tool::{AgentTool, init_team_swarm_runner};
 pub use command_queue::{CommandPriority, CommandQueue, QueuedCommand, drain_command_queue};
 pub use cron_scheduler::start_cron_scheduler;
+pub use goal_loop::{GoalContinuation, StopReason, check_and_continue_goal, mark_goal_complete};
 pub use skill_prefetch::{
     SkillDefinition, SkillIndex, SharedSkillIndex, prefetch_skills, format_skill_listing,
 };
@@ -737,6 +739,21 @@ pub async fn run_query_loop(
         .and_then(|a| a.max_turns)
         .unwrap_or(config.max_turns);
 
+    // Shadow-git snapshot: capture the worktree state before any tools run so we
+    // can produce a per-turn file-change patch when the turn ends.
+    let shadow_snap: Option<std::sync::Arc<claurst_core::snapshot::ShadowSnapshot>> =
+        if tool_ctx.config.auto_commits == Some(true) {
+            claurst_core::snapshot::get_or_create(&tool_ctx.working_dir)
+        } else {
+            None
+        };
+    // Pre-capture tree hash; refreshed at the start of each turn's tool phase.
+    let mut initial_snapshot: Option<String> = if let Some(ref s) = shadow_snap {
+        s.track().await
+    } else {
+        None
+    };
+
     loop {
         turn += 1;
         tool_ctx
@@ -1054,7 +1071,7 @@ pub async fn run_query_loop(
                         .as_ref()
                         .and_then(|model_registry| model_registry.get(&provider_id_str, &model_id_str))
                     {
-                        caps.image_input = model_entry.vision;
+                        caps.image_input = model_entry.vision();
                         caps.tool_calling = model_entry.tool_calling;
                         caps.thinking = model_entry.reasoning;
                     }
@@ -1256,11 +1273,12 @@ pub async fn run_query_loop(
                         }
                     }
 
-                    let assistant_msg = Message {
+                    let mut assistant_msg = Message {
                         role: claurst_core::types::Role::Assistant,
                         content: claurst_core::types::MessageContent::Blocks(content_blocks.clone()),
                         uuid: Some(msg_id),
                         cost: None,
+                        snapshot_patch: None,
                     };
 
                     cost_tracker.add_usage(
@@ -1317,6 +1335,7 @@ pub async fn run_query_loop(
                             content: claurst_core::types::MessageContent::Blocks(tool_results),
                             uuid: None,
                             cost: None,
+                            snapshot_patch: None,
                         });
                         continue; // loop for next turn
                     }
@@ -1328,6 +1347,14 @@ pub async fn run_query_loop(
                             turn,
                             usage: Some(usage.clone()),
                         });
+                    }
+
+                    // Attach snapshot patch covering all file changes this query.
+                    if let (Some(ref snap), Some(ref hash)) = (&shadow_snap, &initial_snapshot) {
+                        let patch = snap.patch(hash).await;
+                        if !patch.files.is_empty() {
+                            assistant_msg.snapshot_patch = Some(patch);
+                        }
                     }
 
                     return QueryOutcome::EndTurn {
@@ -1453,7 +1480,7 @@ pub async fn run_query_loop(
             continue;
         }
 
-        let (assistant_msg, usage, stop_reason) = accumulator.finish();
+        let (mut assistant_msg, usage, stop_reason) = accumulator.finish();
 
         // Track costs
         cost_tracker.add_usage(
@@ -1760,6 +1787,14 @@ pub async fn run_query_loop(
                     }
                 }
 
+                // Attach snapshot patch covering all file changes this query.
+                if let (Some(ref snap), Some(ref hash)) = (&shadow_snap, &initial_snapshot) {
+                    let patch = snap.patch(hash).await;
+                    if !patch.files.is_empty() {
+                        assistant_msg.snapshot_patch = Some(patch);
+                    }
+                }
+
                 return QueryOutcome::EndTurn {
                     message: assistant_msg,
                     usage,
@@ -1978,6 +2013,12 @@ pub async fn run_query_loop(
                     &tool_ctx.config,
                     tool_ctx.working_dir.clone(),
                 );
+                if let (Some(ref snap), Some(ref hash)) = (&shadow_snap, &initial_snapshot) {
+                    let patch = snap.patch(hash).await;
+                    if !patch.files.is_empty() {
+                        assistant_msg.snapshot_patch = Some(patch);
+                    }
+                }
                 return QueryOutcome::EndTurn {
                     message: assistant_msg,
                     usage,
@@ -1991,6 +2032,12 @@ pub async fn run_query_loop(
                     &tool_ctx.config,
                     tool_ctx.working_dir.clone(),
                 );
+                if let (Some(ref snap), Some(ref hash)) = (&shadow_snap, &initial_snapshot) {
+                    let patch = snap.patch(hash).await;
+                    if !patch.files.is_empty() {
+                        assistant_msg.snapshot_patch = Some(patch);
+                    }
+                }
                 return QueryOutcome::EndTurn {
                     message: assistant_msg,
                     usage,

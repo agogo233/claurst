@@ -1,8 +1,8 @@
 <div align="center">
 
 <h1>CLAURST</h1>
-<h3><em>Your Favorite Terminal Coding Agent, now in Rust</em></h3>
-<img src="public/Rustle.png" alt="Rustle the Crab" width="150" />
+<h2><em>Agentic Coding for Builders who Ship</em></h2>
+<img src="public/Ship.png" alt="Rustle on the ship" width="350" />
 
 <p>
     <a href="https://github.com/kuberwastaken/claurst"><img src="https://img.shields.io/badge/Built_with-Rust-CE4D2B?style=for-the-badge&logo=rust&logoColor=white" alt="Built with Rust"></a>
@@ -25,29 +25,53 @@ It's fast, it's memory-efficient, it's yours to run however you want, and there'
 
 > [!NOTE]
 > **Recent Updates:**
+> - **/goal support:** Try out `/goal <objective>` to see claurst keep working an objective, spanning multiple turns instead of stopping after one normal turn. `[EXPERIMENTAL]`
+>
 > - **Managed Agents Preview:** Run `/managed-agents` to create a better agentic loop with a Manager-Executor relation and dramatically improved performance for fractions of the cost from running a larger model. Choose from 6 pre-built templates or build your own.`[EXPERIMENTAL]`
 >
 > - Speech modes: Try `/rocky` and `/caveman` to hear the difference! `/normal` to go back.
->
-> - Multi-Provider Support is here! Run `/connect` to connect to the AI provider of your choice - Anthropic, OpenAI, Google, GitHub Copilot, Ollama, DeepSeek, Groq, Mistral, and [30+ more](#supported-providers).
 
 ---
 
 # Getting Started
 
-## Download a release binary
+## Quick install (one-liner)
 
-Grab the latest binary for your platform from [**GitHub Releases**](https://github.com/kuberwastaken/claurst/releases):
+**Linux / macOS:**
 
-| Platform | Binary |
-|----------|--------|
+```bash
+curl -fsSL https://github.com/kuberwastaken/claurst/releases/latest/download/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://github.com/kuberwastaken/claurst/releases/latest/download/install.ps1 | iex
+```
+
+This drops `claurst` into `~/.claurst/bin` (or `%USERPROFILE%\.claurst\bin` on Windows) and adds it to your `PATH` automatically. Open a new terminal and run `claurst`.
+
+To upgrade later, run:
+
+```bash
+claurst upgrade
+```
+
+> Pin a specific version with `--version 0.0.9` on either installer, or `claurst upgrade --version 0.0.9`.
+
+## Manual download
+
+If you'd rather grab the binary yourself, the latest archives are on [**GitHub Releases**](https://github.com/kuberwastaken/claurst/releases):
+
+| Platform | Archive |
+|----------|---------|
 | **Windows** x86_64 | `claurst-windows-x86_64.zip` |
 | **Linux** x86_64 | `claurst-linux-x86_64.tar.gz` |
 | **Linux** aarch64 | `claurst-linux-aarch64.tar.gz` |
 | **macOS** Intel | `claurst-macos-x86_64.tar.gz` |
 | **macOS** Apple Silicon | `claurst-macos-aarch64.tar.gz` |
 
-### And you're done.
+Each archive contains a single `claurst` (or `claurst.exe`) binary. Extract it and put it on your `PATH`.
 
 ## Build from source
 
@@ -66,22 +90,12 @@ cargo build --release --package claurst
 cargo build --release --package claurst --no-default-features
 ```
 
-### First run
+## First run
 
 ```bash
 # Set your API key (or use /connect inside Claurst to configure)
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# Start Claurst
-claurst
-
-# Or run a one-shot headless query
-claurst -p "explain this codebase"
-```
-
-Just install and run this from anywhere, that easy.
-
-```bash
 # Start Claurst
 claurst
 

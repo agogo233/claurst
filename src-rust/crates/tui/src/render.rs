@@ -21,6 +21,7 @@ use crate::memory_update_notification::render_memory_update_notification;
 use crate::import_config_dialog::render_import_config_dialog;
 use crate::invalid_config_dialog::render_invalid_config_dialog;
 use crate::bypass_permissions_dialog::render_bypass_permissions_dialog;
+use crate::ask_user_dialog::render_ask_user_dialog;
 use crate::onboarding_dialog::render_onboarding_dialog;
 use crate::dialog_select::render_dialog_select;
 use crate::key_input_dialog::render_key_input_dialog;
@@ -113,6 +114,7 @@ fn is_modal_open(app: &App) -> bool {
         || app.import_config_dialog.visible
         || app.invalid_config_dialog.visible
         || app.bypass_permissions_dialog.visible
+        || app.ask_user_dialog.visible
         || app.onboarding_dialog.visible
         || app.import_config_picker.visible
         || app.import_config_dialog.visible
@@ -587,6 +589,12 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     // Bypass-permissions confirmation dialog (topmost — rendered last so it sits above all)
     if app.bypass_permissions_dialog.visible {
         render_bypass_permissions_dialog(frame, &app.bypass_permissions_dialog, size);
+    }
+
+    // AskUserQuestion dialog — renders above bypass-permissions so the model's
+    // question is never obscured by the startup confirmation prompt.
+    if app.ask_user_dialog.visible {
+        render_ask_user_dialog(&app.ask_user_dialog, size, frame.buffer_mut());
     }
 
     // First-launch onboarding dialog (shown after bypass dialog, below elicitation)
@@ -2173,6 +2181,17 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
         // 5. Vim mode — displayed on the left side as "-- MODE --"; nothing extra on right.
 
+        // 5b. Goal badge — shown when a goal is active for this session.
+        if let Some(ref badge) = app.active_goal_badge {
+            if !parts.is_empty() {
+                parts.push(Span::raw("  "));
+            }
+            parts.push(Span::styled(
+                format!("[goal: {}]", badge),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+
         // 6. Agent type badge
         if let Some(ref badge) = app.agent_type_badge {
             if !parts.is_empty() {
@@ -2533,6 +2552,8 @@ pub struct StatusLineData {
     pub agent_badge: Option<String>,
     pub rate_limit_pct_5h: Option<f64>,
     pub rate_limit_pct_7d: Option<f64>,
+    /// Goal badge: Some("active · 5m · 3 turns") when a goal is running.
+    pub goal_badge: Option<String>,
 }
 
 pub fn render_full_status_line(data: &StatusLineData, area: Rect, buf: &mut ratatui::buffer::Buffer) {
@@ -2606,6 +2627,15 @@ pub fn render_full_status_line(data: &StatusLineData, area: Rect, buf: &mut rata
         spans.push(Span::styled(
             format!("[{}]", badge),
             Style::default().fg(Color::Magenta),
+        ));
+        spans.push(Span::styled(" ", Style::default()));
+    }
+
+    // Goal badge
+    if let Some(goal) = &data.goal_badge {
+        spans.push(Span::styled(
+            format!("[goal: {}]", goal),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(" ", Style::default()));
     }
