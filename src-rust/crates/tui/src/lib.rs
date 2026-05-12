@@ -13,6 +13,14 @@
 // - Plugin hint banners
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+// EnableBracketedPaste is intentionally NOT used. On Windows, `EnableBracketedPaste` causes
+// Windows Terminal to wrap Ctrl+V content in VT escape sequences that crossterm's Windows
+// Console API backend doesn't decode as `Event::Paste` — the bytes land as raw key events,
+// turning every `\n` into a prompt submit and triggering PTT on any `v` in the text.
+// Paste is handled cleanly via the Ctrl+V clipboard-reader instead (PowerShell / pbpaste /
+// xclip), which works on all platforms without needing bracketed paste mode.
+#[allow(unused_imports)]
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -111,6 +119,8 @@ pub mod dialog_select;
 pub mod key_input_dialog;
 /// Modal dialog for entering custom provider URL + API key.
 pub mod custom_provider_dialog;
+/// Setup dialog for the composite "Free" provider (Zen → OpenRouter).
+pub mod free_mode_dialog;
 /// Device code / browser-based auth overlay (GitHub Copilot, Anthropic OAuth).
 pub mod device_auth_dialog;
 /// Push-to-talk voice capture and Whisper transcription.
@@ -154,6 +164,7 @@ pub use onboarding_dialog::{OnboardingDialogState, render_onboarding_dialog};
 pub use dialog_select::{DialogSelectState, SelectItem, render_dialog_select};
 pub use key_input_dialog::{KeyInputDialogState, render_key_input_dialog};
 pub use custom_provider_dialog::{CustomProviderDialogState, CustomProviderField, render_custom_provider_dialog};
+pub use free_mode_dialog::{FreeModeDialogState, FreeModeField, render_free_mode_dialog};
 pub use device_auth_dialog::{DeviceAuthDialogState, DeviceAuthStatus, DeviceAuthEvent, render_device_auth_dialog};
 
 // ---------------------------------------------------------------------------
