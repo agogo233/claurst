@@ -249,7 +249,7 @@ fn provider_picker_items() -> Vec<SelectItem> {
         SelectItem { id: "openrouter".into(), title: "OpenRouter".into(), description: "100+ models with one key".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "vercel".into(), title: "Vercel AI Gateway".into(), description: "Gateway for AI SDK models".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "groq".into(), title: "Groq".into(), description: "Fast hosted inference".into(), category: "Popular".into(), badge: Some("FREE".into()) },
-        SelectItem { id: "ollama".into(), title: "Ollama".into(), description: "Run models locally".into(), category: "Popular".into(), badge: Some("LOCAL".into()) },
+        SelectItem { id: "ollama".into(), title: "Ollama".into(), description: "Local inference + cloud models".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "zai".into(), title: "Z.AI".into(), description: "GLM-5.1 / GLM-5 / GLM-4.7 Coding Plan".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "opencode-go".into(), title: "OpenCode Go".into(), description: "$10/mo flat-rate · Kimi · DeepSeek · GLM · MiniMax".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "cerebras".into(), title: "Cerebras".into(), description: "Fast hosted inference".into(), category: "Other".into(), badge: Some("FREE".into()) },
@@ -851,6 +851,9 @@ pub struct App {
     /// When `true`, the main event loop should spawn an async task to fetch
     /// the model list from the current provider's `list_models()` API.
     pub model_picker_fetch_pending: bool,
+    /// The provider ID that the model picker was opened for (used when the
+    /// fetch is triggered from /connect before the provider is activated).
+    pub model_picker_provider_id: Option<String>,
     /// When `true`, the main event loop should spawn an async task to load
     /// the session list from disk and populate the session browser.
     pub session_list_pending: bool,
@@ -962,6 +965,8 @@ pub struct App {
     pub selection_focus: Option<(u16, u16)>,
     /// Text extracted from the current selection (updated each render frame).
     pub selection_text: RefCell<String>,
+    /// When true, releasing a drag selection automatically copies it to clipboard.
+    pub auto_copy_selection: bool,
 
     // ---- Advanced mouse interaction state --------------------------------
     /// Timestamp of the last left mouse click (for double/triple-click detection).
@@ -1158,6 +1163,9 @@ impl App {
         let config = config;
         let model_name = config.effective_model().to_string();
         let user_keybindings = UserKeybindings::load(&Settings::config_dir());
+        let auto_copy_on_highlight = Settings::load_sync()
+            .map(|s| s.auto_copy_on_highlight)
+            .unwrap_or(false);
         Self {
             config,
             cost_tracker,
@@ -1276,6 +1284,7 @@ impl App {
                 reg
             },
             model_picker_fetch_pending: false,
+            model_picker_provider_id: None,
             session_list_pending: false,
             session_list_rx: None,
             auth_store: claurst_core::AuthStore::load(),
@@ -1358,6 +1367,7 @@ impl App {
             selection_anchor: None,
             selection_focus: None,
             selection_text: RefCell::new(String::new()),
+            auto_copy_selection: auto_copy_on_highlight,
             last_click_time: None,
             last_click_position: None,
             click_count: 0,
@@ -1578,6 +1588,8 @@ impl App {
             &self.model_registry,
         );
         self.model_picker.set_models(models);
+        self.model_picker.loading_models = true;
+        self.model_picker_provider_id = Some(provider_id.to_string());
         self.model_picker_fetch_pending = true;
 
         let provider_prefix = format!("{}/", provider_id);
@@ -1877,6 +1889,7 @@ impl App {
         self.device_auth_pending = None;
         self.pending_mcp_panel_auth = None;
         self.model_picker_fetch_pending = false;
+        self.model_picker_provider_id = None;
         self.has_credentials = has_credentials;
         self.fast_mode = false;
         self.model_name = self.config.effective_model().to_string();
@@ -2916,6 +2929,19 @@ impl App {
                 KeyCode::Backspace => {
                     self.key_input_dialog.backspace();
                 }
+                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER) => {
+                    if let Some(text) = crate::image_paste::read_clipboard_text() {
+                        if text.is_empty() {
+                            self.notifications.push(NotificationKind::Warning, "Clipboard is empty".to_string(), Some(2));
+                        } else {
+                            for ch in text.chars() {
+                                self.key_input_dialog.insert_char(ch);
+                            }
+                        }
+                    } else {
+                        self.notifications.push(NotificationKind::Warning, "Could not read clipboard".to_string(), Some(2));
+                    }
+                }
                 KeyCode::Char(c) => {
                     self.key_input_dialog.insert_char(c);
                 }
@@ -3699,11 +3725,12 @@ impl App {
             return false;
         }
 
-        // ---- Ctrl+V — clipboard paste (image first, then text fallback) ----
+        // ---- Ctrl+V / Cmd+V — clipboard paste (image first, then text fallback) ----
         // Only fires when NOT in vim Normal/Visual/VisualBlock mode (where \x16 is
         // already consumed by the vim handler above to enter VisualBlock mode).
         if key.code == KeyCode::Char('v')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
             && !matches!(
                 self.prompt_input.vim_mode,
                 crate::prompt_input::VimMode::Normal
@@ -3843,6 +3870,19 @@ impl App {
                 self.show_help = !self.show_help;
                 self.help_overlay.toggle();
             }
+            // With the kitty keyboard protocol, Shift+/ is reported as Char('/') with
+            // SHIFT rather than Char('?'), so also accept that form for the help toggle.
+            KeyCode::Char('/')
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && !self.is_streaming
+                    && self.prompt_input.is_empty()
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::SUPER) =>
+            {
+                self.show_help = !self.show_help;
+                self.help_overlay.toggle();
+            }
 
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
                 self.prompt_input.kill_line_backward();
@@ -3885,6 +3925,14 @@ impl App {
 
             // ---- Text entry (blocked while streaming) ------------------
             KeyCode::Char(c) if !self.is_streaming => {
+                // With the kitty keyboard protocol, Shift+letter is reported as the base
+                // (lowercase) key with the SHIFT modifier.  Apply uppercase so the
+                // correct character is inserted.
+                let c = if key.modifiers.contains(KeyModifiers::SHIFT) && c.is_ascii_alphabetic() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                };
                 if self.prompt_input.vim_enabled && self.prompt_input.vim_mode != VimMode::Insert {
                     self.prompt_input.vim_command(&c.to_string());
                 } else {
@@ -5411,6 +5459,19 @@ impl App {
                 // Clear if no actual drag (single click = no selection)
                 if self.selection_anchor == self.selection_focus {
                     self.clear_selection();
+                } else if self.auto_copy_selection {
+                    // Auto-copy finalized selection to clipboard.
+                    let sel_text = self.selection_text.borrow().clone();
+                    if !sel_text.is_empty() {
+                        let copied = crate::image_paste::write_clipboard_text(&sel_text);
+                        if copied {
+                            self.notifications.push(
+                                NotificationKind::Info,
+                                "Copied to clipboard".to_string(),
+                                Some(1),
+                            );
+                        }
+                    }
                 }
             }
             _ => {}

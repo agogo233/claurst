@@ -1706,25 +1706,25 @@ async fn run_interactive(
         app.agent_mode = Some(agent_name.clone());
     }
 
-    // Show onboarding: status hint if no credentials, welcome tour if first run.
-    // Skip the welcome tour entirely if the user already has credentials — they've
-    // clearly set things up (via /connect or env vars) and don't need onboarding.
-    if !has_credentials {
-        if !settings.has_completed_onboarding {
-            app.onboarding_dialog.show();
-        } else {
-            app.status_message = Some("No provider configured. Run /connect to set one up.".to_string());
-        }
-    } else if !settings.has_completed_onboarding {
-        // User has credentials but hasn't formally completed onboarding — mark it done
-        // silently so they never see it.
-        let _ = claurst_tui::App::persist_onboarding_complete_pub();
-    }
-
     // Mirror TS BypassPermissionsModeDialog.tsx startup gate
+    // Shown as the highest-priority startup dialog (blocks all other UI).
     use claurst_core::config::PermissionMode;
     if live_config.permission_mode == PermissionMode::BypassPermissions {
         app.bypass_permissions_dialog.show();
+    } else {
+        // Show onboarding only if NOT in bypass-permissions mode.
+        // Bypass dialog is a mandatory security gate and takes absolute priority.
+        if !has_credentials {
+            if !settings.has_completed_onboarding {
+                app.onboarding_dialog.show();
+            } else {
+                app.status_message = Some("No provider configured. Run /connect to set one up.".to_string());
+            }
+        } else if !settings.has_completed_onboarding {
+            // User has credentials but hasn't formally completed onboarding — mark it done
+            // silently so they never see it.
+            let _ = claurst_tui::App::persist_onboarding_complete_pub();
+        }
     }
 
     // Version-upgrade notice: record the current version for future comparisons.
@@ -2599,6 +2599,24 @@ async fn run_interactive(
                         session.updated_at = chrono::Utc::now();
                     }
                 }
+                Event::Paste(data) => {
+                    // Cmd+V paste on macOS / Ctrl+Shift+V on Linux (via bracketed paste)
+                    if !app.is_streaming
+                        && app.permission_request.is_none()
+                        && !app.history_search_overlay.visible
+                        && app.history_search.is_none()
+                    {
+                        if app.key_input_dialog.visible {
+                            // Paste into API key input dialog
+                            for ch in data.chars() {
+                                app.key_input_dialog.insert_char(ch);
+                            }
+                        } else {
+                            // Paste into main prompt input
+                            app.prompt_input.paste(&data);
+                        }
+                    }
+                }
                 Event::Mouse(mouse) => {
                     app.handle_mouse_event(mouse);
                 }
@@ -3082,9 +3100,9 @@ async fn run_interactive(
             match rx.try_recv() {
                 Ok(Ok(entries)) => {
                     let provider = app
-                        .config
-                        .provider
+                        .model_picker_provider_id
                         .clone()
+                        .or_else(|| app.config.provider.clone())
                         .unwrap_or_else(|| "anthropic".to_string());
                     let provider_prefix = format!("{}/", provider);
                     let current = app
@@ -3132,9 +3150,9 @@ async fn run_interactive(
         if app.model_picker_fetch_pending {
             app.model_picker_fetch_pending = false;
             let provider_id_str = app
-                .config
-                .provider
+                .model_picker_provider_id
                 .clone()
+                .or_else(|| app.config.provider.clone())
                 .unwrap_or_else(|| "anthropic".to_string());
             if let Some(ref registry) = app.provider_registry {
                 let pid = claurst_core::ProviderId::new(&provider_id_str);
@@ -3906,10 +3924,10 @@ async fn auth_logout() {
 /// Helper: convert `Option<String>` to a JSON string or null.
 fn subscription_label(subscription_type: Option<&str>) -> Option<String> {
     match subscription_type? {
-        "enterprise" => Some("Claurst Enterprise Account".to_string()),
-        "team" => Some("Claurst Team Account".to_string()),
-        "max" => Some("Claurst Max Account".to_string()),
-        "pro" => Some("Claurst Pro Account".to_string()),
+        "enterprise" => Some("Claude Enterprise Account".to_string()),
+        "team" => Some("Claude Team Account".to_string()),
+        "max" => Some("Claude Max Account".to_string()),
+        "pro" => Some("Claude Pro Account".to_string()),
         other if !other.is_empty() => Some(format!("{} Account", other)),
         _ => None,
     }
