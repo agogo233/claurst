@@ -983,6 +983,10 @@ fn render_file_op_result(is_create: bool) -> Vec<Line<'static>> {
 /// Render a tool result (success variant) — generic fallback.
 pub fn render_tool_result_success(output: &str, truncated: bool) -> Vec<Line<'static>> {
     let total_lines = output.lines().count();
+    // Use explicit Gray (brighter than terminal default DarkGray) so tool
+    // output stays legible on themes where the default fg gets dimmed by
+    // surrounding styles. Issue #149: tool result text contrast was too low.
+    let body_style = Style::default().fg(Color::Gray);
     let mut lines: Vec<Line<'static>> = output
         .lines()
         .enumerate()
@@ -990,7 +994,7 @@ pub fn render_tool_result_success(output: &str, truncated: bool) -> Vec<Line<'st
         .map(|(_, l)| {
             Line::from(vec![
                 Span::styled("  ", Style::default()),
-                Span::raw(l.to_string()),
+                Span::styled(l.to_string(), body_style),
             ])
         })
         .collect();
@@ -1865,6 +1869,10 @@ pub fn render_goal_event(text: &str, width: u16) -> Vec<Line<'static>> {
 }
 
 /// Simple plain-text word-wrap (no markdown, no indent prefix).
+///
+/// Words longer than `max_width` (e.g. URLs) are hard-broken at character
+/// boundaries so they do not overflow the buffer (issue #149 follow-up:
+/// long URLs at end of message went off-screen).
 fn wrap_plain_text(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
@@ -1876,15 +1884,43 @@ fn wrap_plain_text(text: &str, max_width: usize) -> Vec<String> {
             continue;
         }
         let mut current = String::new();
+        let mut current_len = 0usize;
         for word in para.split_whitespace() {
+            let word_len = word.chars().count();
+            if word_len > max_width {
+                // Flush whatever we have, then hard-break the long word.
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                    current_len = 0;
+                }
+                let chars: Vec<char> = word.chars().collect();
+                let mut i = 0;
+                while i < chars.len() {
+                    let end = (i + max_width).min(chars.len());
+                    let chunk: String = chars[i..end].iter().collect();
+                    if end == chars.len() {
+                        // Last fragment becomes the start of the next visual
+                        // line so following words can flow after it.
+                        current = chunk;
+                        current_len = end - i;
+                    } else {
+                        out.push(chunk);
+                    }
+                    i = end;
+                }
+                continue;
+            }
             if current.is_empty() {
                 current.push_str(word);
-            } else if current.len() + 1 + word.len() <= max_width {
+                current_len = word_len;
+            } else if current_len + 1 + word_len <= max_width {
                 current.push(' ');
                 current.push_str(word);
+                current_len += 1 + word_len;
             } else {
-                out.push(current.clone());
-                current = word.to_string();
+                out.push(std::mem::take(&mut current));
+                current.push_str(word);
+                current_len = word_len;
             }
         }
         if !current.is_empty() {

@@ -1,4 +1,4 @@
-﻿// render.rs â€” All ratatui rendering logic.
+// render.rs â€” All ratatui rendering logic.
 
 use std::cell::RefCell;
 
@@ -44,7 +44,6 @@ use crate::overlays::{
     CLAURST_ACCENT,
 };
 use crate::plugin_views::render_plugin_hints;
-use crate::privacy_screen::render_privacy_screen;
 use crate::prompt_input::{InputMode, TypeaheadSource, VimMode, input_height, render_prompt_input};
 use crate::settings_screen::render_settings_screen;
 use crate::stats_dialog::render_stats_dialog;
@@ -98,7 +97,6 @@ fn is_modal_open(app: &App) -> bool {
         || app.history_search.is_some()
         || app.settings_screen.visible
         || app.theme_screen.visible
-        || app.privacy_screen.visible
         || app.stats_dialog.open
         || app.mcp_view.open
         || app.agents_menu.open
@@ -425,7 +423,11 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     } else {
         0
     };
-    let prompt_height = input_height(&app.prompt_input) + 1; // +1 for model/mode status line
+    // The prompt body width is the terminal width minus the prompt prefix
+    // ("> ") and the right-margin padding used inside `render_prompt_input`.
+    // Keep this in sync with prefix_width=2 + right_pad=2 there.
+    let prompt_text_width = size.width.saturating_sub(4);
+    let prompt_height = input_height(&app.prompt_input, prompt_text_width) + 1; // +1 for model/mode status line
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -497,11 +499,6 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     // Theme picker overlay
     if app.theme_screen.visible {
         render_theme_screen(frame, &app.theme_screen, size);
-    }
-
-    // Privacy settings dialog
-    if app.privacy_screen.visible {
-        render_privacy_screen(frame, &app.privacy_screen, size);
     }
 
     if app.stats_dialog.open {
@@ -601,6 +598,11 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_onboarding_dialog(frame, &app.onboarding_dialog, size);
     }
 
+    // /effort picker
+    if app.effort_picker.visible {
+        crate::effort_picker::render_effort_picker(frame, &app.effort_picker, size);
+    }
+
     // Import-config source picker
     if app.import_config_picker.visible {
         render_dialog_select(frame, &app.import_config_picker, size);
@@ -689,7 +691,44 @@ pub fn render_app(frame: &mut Frame, app: &App) {
 
     // ---- Text selection highlight (topmost post-pass) ---------------------
     apply_selection_highlight(frame, app);
+    cache_selectable_row_text(frame, app);
     render_context_menu(frame, app);
+}
+
+/// Snapshot the rendered text of every row inside the selectable area into
+/// `app.last_row_text` so that subsequent double/triple-clicks can locate
+/// word and paragraph boundaries (issue #149 follow-up).
+fn cache_selectable_row_text(frame: &mut Frame, app: &App) {
+    let selectable_area = app.last_selectable_area.get();
+    if selectable_area.width == 0 || selectable_area.height == 0 {
+        app.last_row_text.borrow_mut().clear();
+        return;
+    }
+    let buf = frame.buffer_mut();
+    let max_row = selectable_area
+        .y
+        .saturating_add(selectable_area.height)
+        .saturating_sub(1);
+    let max_col = selectable_area
+        .x
+        .saturating_add(selectable_area.width)
+        .saturating_sub(1);
+    let mut cache = app.last_row_text.borrow_mut();
+    cache.clear();
+    for row in selectable_area.y..=max_row {
+        let mut s = String::new();
+        for col in selectable_area.x..=max_col {
+            if let Some(cell) = buf.cell_mut((col, row)) {
+                let sym = cell.symbol();
+                if sym.is_empty() || sym == "\0" {
+                    s.push(' ');
+                } else {
+                    s.push_str(sym);
+                }
+            }
+        }
+        cache.insert(row, s);
+    }
 }
 
 /// Post-render pass: invert colours on selected cells and extract the
@@ -1002,13 +1041,19 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     if content_height > visible_height {
         use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
+        // Issue #149 follow-up: passing `viewport_content_length(1)` made
+        // ratatui place a 1-row thumb on a track sized to `max_scroll`, which
+        // produced asymmetric gaps between the thumb and the up/down arrows
+        // at the extremes. Using the actual `content_height` and
+        // `visible_height` lets ratatui compute a proportional thumb that
+        // sits flush with the arrows at both ends.
         let mut scrollbar_state = ScrollbarState::new(content_height as usize)
-            .position(scroll)
+            .position((scroll as usize).min(content_height as usize))
             .viewport_content_length(visible_height as usize);
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(app.accent_color))  // accent thumb
-            .track_style(Style::default().fg(Color::Rgb(40, 40, 50)));  // dark track
+            .thumb_style(Style::default().fg(app.accent_color))
+            .track_style(Style::default().fg(Color::Rgb(40, 40, 50)));
 
         frame.render_stateful_widget(scrollbar, msg_area, &mut scrollbar_state);
     }
@@ -1706,7 +1751,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
         let dim = Color::Rgb(110, 110, 124);
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1), Constraint::Length(status_area.width.min(36))])
+            .constraints([Constraint::Min(1), Constraint::Length(status_area.width.min(50))])
             .split(status_area);
 
         let left_line = if app.has_credentials {
@@ -1757,10 +1802,11 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
             let mut hint = vec![Span::styled("Ctrl+A model", Style::default().fg(dim))];
             hint.push(Span::styled(" · ", Style::default().fg(dim)));
             hint.push(Span::styled("Ctrl+K commands", Style::default().fg(dim)));
-            if !app.is_streaming && app.prompt_input.text.is_empty() {
-                hint.push(Span::styled(" · ", Style::default().fg(dim)));
-                hint.push(Span::styled("? shortcuts", Style::default().fg(dim)));
-            }
+            // Always show the ? shortcut hint — previously hidden while
+            // typing or streaming, but users want it visible at all times
+            // (issue #149 follow-up).
+            hint.push(Span::styled(" · ", Style::default().fg(dim)));
+            hint.push(Span::styled("? shortcuts", Style::default().fg(dim)));
             Line::from(hint)
         } else {
             Line::from(vec![Span::styled("Ctrl+K commands", Style::default().fg(dim))])
@@ -1786,6 +1832,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
             InputMode::Default
         },
         app.accent_color,
+        app.settings_screen.cursor_blink_enabled,
     );
 }
 
@@ -2046,19 +2093,14 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
-        // During streaming show "esc to interrupt"; otherwise "? for shortcuts" when idle
-        if spans.is_empty() {
-            if app.is_streaming {
-                spans.push(Span::styled(
-                    "esc interrupt",
-                    Style::default().fg(Color::DarkGray),
-                ));
-            } else if app.prompt_input.text.is_empty() {
-                spans.push(Span::styled(
-                    "? shortcuts",
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
+        // During streaming show "esc to interrupt". The "? shortcuts" hint is
+        // rendered in the top-right status bar (see render_prompt area), so do
+        // not duplicate it here (issue #149 follow-up).
+        if spans.is_empty() && app.is_streaming {
+            spans.push(Span::styled(
+                "esc interrupt",
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
         spans
@@ -2218,6 +2260,36 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
 
+        // Git branch (if settings enabled)
+        if app.settings_screen.show_git_branch {
+            if let Some(ref branch) = app.git_branch {
+                if !parts.is_empty() {
+                    parts.push(Span::raw("  "));
+                }
+                parts.push(Span::styled(
+                    format!("⎇ {}", branch),
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+        }
+
+        // Current directory (if settings enabled)
+        if app.settings_screen.show_cwd {
+            if let Some(ref dir) = app.current_dir {
+                if !parts.is_empty() {
+                    parts.push(Span::raw("  "));
+                }
+                let display_dir = if dir.starts_with(std::env::var("HOME").as_deref().unwrap_or("")) {
+                    dir.replace(std::env::var("HOME").as_deref().unwrap_or(""), "~")
+                } else {
+                    dir.clone()
+                };
+                parts.push(Span::styled(
+                    display_dir,
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
 
         // Output style indicator (only when non-default)
         if app.output_style != "auto" {
@@ -2241,17 +2313,6 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 .filter(|c| c.is_ascii_graphic() || *c == ' ')
                 .collect();
             parts.push(Span::styled(clean, Style::default().fg(Color::DarkGray)));
-        }
-
-        // 8b. Update available indicator — shown when a newer version was found.
-        if let Some(ref version) = app.update_available {
-            if !parts.is_empty() {
-                parts.push(Span::raw("  "));
-            }
-            parts.push(Span::styled(
-                format!("⬆ v{} available — /update", version),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ));
         }
 
         // 8. Bridge badge

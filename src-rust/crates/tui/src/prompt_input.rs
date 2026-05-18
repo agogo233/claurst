@@ -2407,6 +2407,109 @@ impl PromptInputState {
         self.update_token_estimate();
     }
 
+    /// Map the current cursor (byte offset) to a (visual_row, visual_col) pair
+    /// given the wrap width. `width` is the usable column count for text.
+    pub fn cursor_visual_pos(&self, width: usize) -> (usize, usize) {
+        if width == 0 {
+            return (0, 0);
+        }
+        let mut byte = 0usize;
+        let mut row = 0usize;
+        for line in self.text.split('\n') {
+            let line_end = byte + line.len();
+            if self.cursor <= line_end {
+                let intra_byte = self.cursor - byte;
+                let intra_byte = intra_byte.min(line.len());
+                // walk to char-boundary
+                let mut b = intra_byte;
+                while b > 0 && !line.is_char_boundary(b) {
+                    b -= 1;
+                }
+                let intra_chars = line[..b].chars().count();
+                let chunk_idx = if intra_chars == 0 { 0 } else { intra_chars / width };
+                let chunk_col = intra_chars % width;
+                return (row + chunk_idx, chunk_col);
+            }
+            let chunks = wrap_line(line, width).len().max(1);
+            row += chunks;
+            byte = line_end + 1; // newline
+        }
+        (row.saturating_sub(1), 0)
+    }
+
+    /// Move the cursor to the same visual column on the row above. Returns
+    /// `true` if the cursor actually moved (i.e. there was a row above).
+    pub fn move_visual_up(&mut self, width: usize) -> bool {
+        if width == 0 {
+            return false;
+        }
+        let (row, col) = self.cursor_visual_pos(width);
+        if row == 0 {
+            return false;
+        }
+        self.set_cursor_at_visual(row - 1, col, width);
+        true
+    }
+
+    /// Move the cursor to the same visual column on the row below. Returns
+    /// `true` if the cursor actually moved (i.e. there was a row below).
+    pub fn move_visual_down(&mut self, width: usize) -> bool {
+        if width == 0 {
+            return false;
+        }
+        let (row, col) = self.cursor_visual_pos(width);
+        let total_rows = self.visual_row_count(width);
+        if row + 1 >= total_rows {
+            return false;
+        }
+        self.set_cursor_at_visual(row + 1, col, width);
+        true
+    }
+
+    fn visual_row_count(&self, width: usize) -> usize {
+        if self.text.is_empty() || width == 0 {
+            return 1;
+        }
+        let mut total = 0usize;
+        for line in self.text.split('\n') {
+            total += wrap_line(line, width).len().max(1);
+        }
+        total.max(1)
+    }
+
+    fn set_cursor_at_visual(&mut self, target_row: usize, target_col: usize, width: usize) {
+        if width == 0 {
+            return;
+        }
+        let mut byte = 0usize;
+        let mut row = 0usize;
+        for line in self.text.split('\n').collect::<Vec<_>>() {
+            let chunks = wrap_line(line, width).len().max(1);
+            if target_row < row + chunks {
+                let intra_chunk = target_row - row;
+                let chunk_char_start = intra_chunk * width;
+                let line_chars: Vec<(usize, char)> = line.char_indices().collect();
+                let chunk_chars_len = line_chars
+                    .len()
+                    .saturating_sub(chunk_char_start)
+                    .min(width);
+                let col = target_col.min(chunk_chars_len);
+                let target_char_idx = chunk_char_start + col;
+                let intra_byte = line_chars
+                    .get(target_char_idx)
+                    .map(|(b, _)| *b)
+                    .unwrap_or(line.len());
+                self.cursor = byte + intra_byte;
+                self.history_pos = None;
+                return;
+            }
+            row += chunks;
+            byte += line.len() + 1; // newline
+        }
+        self.cursor = self.text.len();
+        self.history_pos = None;
+    }
+
     /// Normalize cursor and metadata after external field updates.
     pub fn normalize(&mut self) {
         self.cursor = self.cursor.min(self.text.len());
@@ -2433,17 +2536,56 @@ impl Default for PromptInputState {
 // ---------------------------------------------------------------------------
 
 /// Return the number of rows needed to render the input for the given text.
-/// Minimum 4 (1 top-line + 1 text row + 1 bottom-line + 1 breathing room), capped at 12.
-pub fn input_height(state: &PromptInputState) -> u16 {
-    let line_count = if state.text.is_empty() {
-        1
-    } else {
+/// `text_width` is the usable column count for wrapped text (i.e. area.width
+/// minus the prompt prefix and right margin). When 0 we degrade gracefully and
+/// only count logical lines.
+///
+/// Issue #149 follow-up: previously this only counted `\n`-separated lines, so
+/// a single long visually-wrapped line stayed at the minimum height. Now we
+/// count the actual visual row count and grow the box up to ~10 text rows
+/// (12 total including the underline + breathing room). Larger inputs scroll
+/// inside the box (handled in `render_prompt_input`).
+pub fn input_height(state: &PromptInputState, text_width: u16) -> u16 {
+    let visual_lines = if state.text.is_empty() {
+        1usize
+    } else if text_width == 0 {
         state.text.lines().count().max(1)
+    } else {
+        let mut total = 0usize;
+        let logical: Vec<&str> = state.text.split('\n').collect();
+        for line in &logical {
+            let chunks = wrap_line(line, text_width as usize).len().max(1);
+            total += chunks;
+        }
+        total.max(1)
     };
-    // top-line + text rows + bottom-line + 1 breathing-room row, at least 4, at most 12
-    let base = ((line_count as u16) + 3).max(4).min(12);
-    // +1 for image pill row when images are pending
+    // top-line + text rows + breathing room + underline, capped so the prompt
+    // never eats more than ~half the screen.
+    const MAX_TEXT_ROWS: usize = 10;
+    let text_rows = visual_lines.min(MAX_TEXT_ROWS) as u16;
+    let base = (text_rows + 3).max(4);
     base + if state.pending_images.is_empty() { 0 } else { 1 }
+}
+
+/// Wrap a logical line into visual chunks of `width` chars (char-based, not
+/// byte-based, to preserve UTF-8 characters). Empty input yields a single
+/// empty chunk so the caller can still place a cursor.
+pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![line.to_string()];
+    }
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::with_capacity(chars.len() / width + 1);
+    let mut i = 0;
+    while i < chars.len() {
+        let end = (i + width).min(chars.len());
+        out.push(chars[i..end].iter().collect());
+        i = end;
+    }
+    out
 }
 
 /// Render the prompt input widget in the same low-chrome style as Claurst:
@@ -2457,6 +2599,7 @@ pub fn render_prompt_input(
     focused: bool,
     mode: InputMode,
     accent_override: Color,
+    cursor_blink_enabled: bool,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -2494,31 +2637,35 @@ pub fn render_prompt_input(
     };
     let prompt_prefix = format!("{PROMPT_POINTER} ");
     let prefix_width = prompt_prefix.chars().count() as u16;
-    let available_width = area.width.saturating_sub(prefix_width) as usize;
-    // Blink the cursor at ~1 Hz (530 ms on, 530 ms off).  We use wall-clock
-    // time so the period is stable regardless of frame rate.
-    let cursor_blink_on = {
+    // Reserve a 2-cell right margin so wrapped text doesn't kiss the right edge
+    // of the box (issue #149: padding too tight).
+    let right_pad: u16 = 2;
+    let available_width = area
+        .width
+        .saturating_sub(prefix_width)
+        .saturating_sub(right_pad) as usize;
+    let cursor_visible = if cursor_blink_enabled {
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         (ms / 530) % 2 == 0
+    } else {
+        true
     };
-    let cursor = if focused && cursor_blink_on { "\u{2588}" } else { "" };
+    // Render cursor as an overlay so its blink state never shifts the
+    // underlying text (issue #149: cursor blink shifted the prompt).
+    let show_cursor = focused && cursor_visible;
 
-    // Build the full content string (with cursor embedded).
-    let full_content: String = if state.text.is_empty() {
+    // Use the raw text — no inline cursor character — so layout is stable.
+    let display_text: String = if state.text.is_empty() {
         if focused {
-            cursor.to_string()
+            String::new()
         } else if mode == InputMode::Default {
             "How can I help you?".to_string()
         } else {
             String::new()
         }
-    } else if focused && state.cursor <= state.text.len() {
-        let mut text = state.text.clone();
-        text.insert_str(state.cursor, cursor);
-        text
     } else {
         state.text.clone()
     };
@@ -2537,8 +2684,14 @@ pub fn render_prompt_input(
 
     // Split into logical lines; guarantee at least one.
     let logical_lines: Vec<String> = {
-        let collected: Vec<String> = full_content.lines().map(|l| l.to_string()).collect();
-        if collected.is_empty() { vec![String::new()] } else { collected }
+        let collected: Vec<String> = display_text.lines().map(|l| l.to_string()).collect();
+        if display_text.ends_with('\n') || collected.is_empty() {
+            let mut v = collected;
+            v.push(String::new());
+            v
+        } else {
+            collected
+        }
     };
 
     let text_style = if state.text.is_empty() && !focused {
@@ -2547,34 +2700,102 @@ pub fn render_prompt_input(
         Style::default().fg(Color::White)
     };
 
-    // Render each logical line (truncated to available width from the right).
-    // Reserve 1 row at top (separator) + 1 at bottom (underline).
-    let max_text_rows = area.height.saturating_sub(2) as usize;
-    for (i, line_text) in logical_lines.iter().enumerate() {
-        if i >= max_text_rows {
-            break;
+    // Wrap each logical line into visual rows that fit `available_width`,
+    // and remember the (logical_idx, intra_line_char_offset) for each row
+    // so we can later compute where the cursor lives.
+    let mut visual_rows: Vec<(usize, usize, String)> = Vec::new();
+    for (li, line_text) in logical_lines.iter().enumerate() {
+        let chunks = wrap_line(line_text, available_width.max(1));
+        let mut col_offset = 0usize;
+        for chunk in chunks {
+            let chunk_len = chunk.chars().count();
+            visual_rows.push((li, col_offset, chunk));
+            col_offset += chunk_len;
         }
-        let row_y = text_start_y + i as u16;
+    }
 
-        let visible: String = line_text
-            .chars()
-            .rev()
-            .take(available_width)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+    // Compute cursor's visual (row, col) within `visual_rows`.
+    // We map state.cursor (a byte offset into state.text) to (logical_line, char_offset).
+    let cursor_pos: Option<(usize, usize)> = if focused && !state.text.is_empty() {
+        let mut byte_idx = 0usize;
+        let mut found: Option<(usize, usize)> = None;
+        'outer: for (li, line_text) in logical_lines.iter().enumerate() {
+            let line_bytes = line_text.len();
+            // The +1 accounts for the '\n' between logical lines (last line has no trailing \n).
+            let line_end_byte = byte_idx + line_bytes;
+            if state.cursor <= line_end_byte {
+                let intra_byte = state.cursor - byte_idx;
+                let char_offset = line_text[..intra_byte.min(line_bytes)].chars().count();
+                found = Some((li, char_offset));
+                break 'outer;
+            }
+            byte_idx = line_end_byte + 1; // newline
+        }
+        // Fallback: cursor at end of text.
+        found.or_else(|| {
+            let li = logical_lines.len().saturating_sub(1);
+            let col = logical_lines.get(li).map(|s| s.chars().count()).unwrap_or(0);
+            Some((li, col))
+        })
+    } else if focused && state.text.is_empty() {
+        Some((0, 0))
+    } else {
+        None
+    };
 
-        let spans: Vec<Span<'static>> = if i == 0 {
+    let cursor_visual: Option<(usize, usize)> = cursor_pos.and_then(|(li, col)| {
+        // Find the visual row whose logical_idx == li and contains `col`.
+        let mut last_match: Option<(usize, usize)> = None;
+        for (vi, (row_li, row_col_start, chunk)) in visual_rows.iter().enumerate() {
+            if *row_li != li {
+                continue;
+            }
+            let chunk_len = chunk.chars().count();
+            let row_col_end = row_col_start + chunk_len;
+            if col >= *row_col_start && col <= row_col_end {
+                last_match = Some((vi, col - row_col_start));
+            }
+        }
+        last_match
+    });
+
+    // Render each visual row (truncated to area height).
+    let max_text_rows = area.height.saturating_sub(2) as usize;
+    // Scroll so the cursor row is visible.
+    let scroll_offset = match cursor_visual {
+        Some((vi, _)) if visual_rows.len() > max_text_rows && vi >= max_text_rows => {
+            vi + 1 - max_text_rows
+        }
+        _ => 0,
+    };
+
+    for (display_idx, (vi, (li, _col_start, chunk))) in visual_rows
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(max_text_rows)
+        .map(|(idx, item)| (idx - scroll_offset, item))
+        .enumerate()
+        .map(|(d, (idx, item))| (d, (idx + scroll_offset, item)))
+    {
+        let _ = vi;
+        let _ = li;
+        let row_y = text_start_y + display_idx as u16;
+
+        // Determine if this is the first visual row of the first logical line —
+        // that's the only row that gets the prompt prefix; continuation rows
+        // (whether from logical line breaks or wrapping) get whitespace.
+        let is_first_row_of_first_logical = display_idx == 0 && scroll_offset == 0;
+
+        let spans: Vec<Span<'static>> = if is_first_row_of_first_logical {
             vec![
                 Span::styled(prompt_prefix.clone(), Style::default().fg(accent).add_modifier(Modifier::BOLD)),
-                Span::styled(visible, text_style),
+                Span::styled(chunk.clone(), text_style),
             ]
         } else {
-            // Continuation lines: indent to align with text after prefix
             vec![
                 Span::raw(" ".repeat(prefix_width as usize)),
-                Span::styled(visible, text_style),
+                Span::styled(chunk.clone(), text_style),
             ]
         };
 
@@ -2584,8 +2805,31 @@ pub fn render_prompt_input(
         );
     }
 
+    // Overlay the cursor block on top of the rendered text. We modify the
+    // buffer cell directly so the cursor occupies the same column whether
+    // it is currently blinking on or off.
+    if show_cursor {
+        if let Some((vi, col_in_row)) = cursor_visual {
+            if vi >= scroll_offset {
+                let display_idx = vi - scroll_offset;
+                if display_idx < max_text_rows {
+                    let row_y = text_start_y + display_idx as u16;
+                    let x = area.x + prefix_width + col_in_row as u16;
+                    if x < area.x + area.width && row_y < area.y + area.height {
+                        let cell = &mut buf[(x, row_y)];
+                        cell.set_symbol("\u{2588}");
+                        cell.set_style(Style::default().fg(text_style.fg.unwrap_or(Color::White)));
+                    }
+                }
+            }
+        }
+    }
+
     // Vim command / search row (shown below text lines, before underline).
-    let text_rows_rendered = logical_lines.len().min(max_text_rows);
+    let text_rows_rendered = visual_rows
+        .len()
+        .saturating_sub(scroll_offset)
+        .min(max_text_rows);
     let cmd_line: Option<Line<'static>> = match state.vim_mode {
         VimMode::Command => {
             let buf_text = format!(":{}\u{2588}", state.vim_command_buf);

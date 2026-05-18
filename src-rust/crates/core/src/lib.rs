@@ -962,6 +962,9 @@ pub mod config {
         /// Set via `--auto-commits` flag or `"autoCommits": true` in settings.json.
         #[serde(default, rename = "autoCommits", skip_serializing_if = "Option::is_none")]
         pub auto_commits: Option<bool>,
+        /// Enable cursor blinking in the chat prompt. Defaults to false (disabled).
+        #[serde(default, rename = "cursorBlinkEnabled", skip_serializing_if = "is_false")]
+        pub cursor_blink_enabled: bool,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1078,6 +1081,27 @@ pub mod config {
         /// `~/.claurst/settings.json`.
         #[serde(default, rename = "autoCopyOnHighlight")]
         pub auto_copy_on_highlight: bool,
+        /// Whether to show current working directory in footer. Defaults to true.
+        #[serde(default = "default_true", rename = "showCwd")]
+        pub show_cwd: bool,
+        /// Whether to show git branch in footer. Defaults to true.
+        #[serde(default = "default_true", rename = "showGitBranch")]
+        pub show_git_branch: bool,
+        /// Whether to enable desktop notifications. Defaults to true.
+        #[serde(default = "default_true", rename = "notifications")]
+        pub notifications: bool,
+        /// Whether to show turn duration in output. Defaults to false.
+        #[serde(default, rename = "showTurnDuration")]
+        pub show_turn_duration: bool,
+        /// Whether to reduce motion in UI. Defaults to false.
+        #[serde(default, rename = "reduceMotion")]
+        pub reduce_motion: bool,
+        /// Whether to show terminal progress bars. Defaults to true.
+        #[serde(default = "default_true", rename = "terminalProgressBar")]
+        pub terminal_progress_bar: bool,
+        /// Whether to enable auto-compact. Defaults to true.
+        #[serde(default = "default_true", rename = "autoCompact")]
+        pub auto_compact: bool,
     }
 
     /// A user-defined slash command template.
@@ -1155,6 +1179,10 @@ pub mod config {
             color: Some("green".to_string()),
         });
         m
+    }
+
+    fn is_false(b: &bool) -> bool {
+        !b
     }
 
     impl Config {
@@ -1583,6 +1611,7 @@ pub mod config {
                 },
                 managed_agents: over.config.managed_agents.or(base.config.managed_agents),
                 auto_commits: over.config.auto_commits.or(base.config.auto_commits),
+                cursor_blink_enabled: over.config.cursor_blink_enabled || base.config.cursor_blink_enabled,
             };
             Self {
                 config: merged_config,
@@ -1608,6 +1637,13 @@ pub mod config {
                 },
                 managed_agents: over.managed_agents.or(base.managed_agents),
                 auto_copy_on_highlight: over.auto_copy_on_highlight || base.auto_copy_on_highlight,
+                notifications: over.notifications || base.notifications,
+                show_turn_duration: over.show_turn_duration || base.show_turn_duration,
+                reduce_motion: over.reduce_motion || base.reduce_motion,
+                terminal_progress_bar: over.terminal_progress_bar || base.terminal_progress_bar,
+                show_cwd: over.show_cwd || base.show_cwd,
+                show_git_branch: over.show_git_branch || base.show_git_branch,
+                auto_compact: over.auto_compact || base.auto_compact,
             }
         }
     }

@@ -18,7 +18,6 @@ use crate::overlays::{
     RewindFlowOverlay, SelectorMessage,
 };
 use crate::plugin_views::PluginHintBanner;
-use crate::privacy_screen::PrivacyScreen;
 use crate::prompt_input::{InputMode, PromptInputState, VimMode};
 use crate::render;
 use crate::settings_screen::SettingsScreen;
@@ -73,12 +72,12 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("keybindings", "Show keybinding configuration"),
     ("login", "Log in to Claurst"),
     ("logout", "Log out of Claurst"),
+    ("managed-agents", "Configure manager-executor managed agent system"),
     ("mcp", "Browse configured MCP servers"),
     ("memory", "Browse and open AGENTS.md memory files"),
     ("model", "Change the AI model"),
     ("output-style", "Toggle output style (auto/stream/verbose)"),
     ("plugin", "Manage plugins (list/info/enable/disable/reload)"),
-    ("privacy", "Open privacy settings"),
     ("providers", "List available AI providers and their status"),
     ("caveman", "Caveman speech mode — save big token"),
     ("rocky", "Rocky speech mode — amaze amaze amaze"),
@@ -95,6 +94,8 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("survey", "Open session feedback survey"),
     ("theme", "Open the theme picker"),
     ("ultrareview", "Run an exhaustive multi-dimensional code review"),
+    ("update", "Check for updates and upgrade to the latest version"),
+    ("upgrade", "Check for updates and upgrade to the latest version"),
     ("vim", "Toggle vim keybindings"),
     ("voice", "Toggle voice input mode"),
 ];
@@ -104,7 +105,7 @@ fn help_command_category(name: &str) -> &'static str {
         "connect" | "model" | "providers" | "refresh" | "fast" | "effort" | "voice" => "Model & Provider",
         "changes" | "diff" | "review" | "rewind" | "export" | "copy" => "Review & History",
         "stats" | "cost" | "context" | "insights" | "heapdump" | "doctor" => "Diagnostics",
-        "config" | "settings" | "theme" | "privacy" | "keybindings" | "hooks" | "mcp" | "import-config" => {
+        "config" | "settings" | "theme" | "keybindings" | "hooks" | "mcp" | "import-config" => {
             "Workspace"
         }
         "agent" | "agents" | "memory" | "plugin" | "feedback" | "survey" => "Tools",
@@ -252,6 +253,10 @@ fn provider_picker_items() -> Vec<SelectItem> {
         SelectItem { id: "ollama".into(), title: "Ollama".into(), description: "Local inference + cloud models".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "zai".into(), title: "Z.AI".into(), description: "GLM-5.1 / GLM-5 / GLM-4.7 Coding Plan".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "opencode-go".into(), title: "OpenCode Go".into(), description: "$10/mo flat-rate · Kimi · DeepSeek · GLM · MiniMax".into(), category: "Popular".into(), badge: None },
+        SelectItem { id: "opencode-zen".into(), title: "OpenCode Zen".into(), description: "Free models + paid · Nemotron · Ring · MiniMax · DeepSeek".into(), category: "Popular".into(), badge: Some("FREE".into()) },
+        SelectItem { id: "synthetic".into(), title: "Synthetic.dev".into(), description: "Hosted open weights".into(), category: "Popular".into(), badge: None },
+        SelectItem { id: "routing".into(), title: "routing.run".into(), description: "Hosted open weights · DeepSeek · Llama · Mixtral · Qwen".into(), category: "Popular".into(), badge: None },
+        SelectItem { id: "neuralwatt".into(), title: "NeuralWatt".into(), description: "Hosted open weights - energy-efficient".into(), category: "Popular".into(), badge: None },
         SelectItem { id: "cerebras".into(), title: "Cerebras".into(), description: "Fast hosted inference".into(), category: "Other".into(), badge: Some("FREE".into()) },
         SelectItem { id: "sambanova".into(), title: "SambaNova".into(), description: "Fast hosted inference".into(), category: "Other".into(), badge: Some("FREE".into()) },
         SelectItem { id: "lmstudio".into(), title: "LM Studio".into(), description: "Local model server".into(), category: "Other".into(), badge: Some("LOCAL".into()) },
@@ -783,8 +788,6 @@ pub struct App {
     pub settings_screen: SettingsScreen,
     /// Theme picker overlay (/theme).
     pub theme_screen: ThemeScreen,
-    /// Privacy settings dialog (/privacy-settings).
-    pub privacy_screen: PrivacyScreen,
     /// Token/cost analytics dialog.
     pub stats_dialog: StatsDialogState,
     /// MCP server browser and tool detail view.
@@ -831,8 +834,12 @@ pub struct App {
     /// Shown at startup when --dangerously-skip-permissions was passed.
     /// User must explicitly accept or the session exits.
     pub bypass_permissions_dialog: crate::bypass_permissions_dialog::BypassPermissionsDialogState,
+    /// Whether the bypass-permissions dialog has been shown this session.
+    pub bypass_permissions_dialog_shown: bool,
     /// First-launch onboarding welcome dialog.
     pub onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState,
+    /// Effort-level picker (/effort with no args).
+    pub effort_picker: crate::effort_picker::EffortPickerState,
     /// API key input dialog (opened from /connect for key-based providers).
     pub key_input_dialog: crate::key_input_dialog::KeyInputDialogState,
     /// Custom provider dialog for URL + API key input.
@@ -862,6 +869,12 @@ pub struct App {
         Option<tokio::sync::mpsc::Receiver<Vec<crate::session_browser::SessionEntry>>>,
     /// Credential store for provider API keys and OAuth tokens.
     pub auth_store: claurst_core::AuthStore,
+    /// Messages typed by the user while a query was streaming. They will be
+    /// auto-submitted in order once the current turn completes (issue #149).
+    pub queued_messages: std::collections::VecDeque<String>,
+    /// When `true`, the main loop will inject a synthetic Enter event on the
+    /// next iteration to dequeue and submit the next queued message.
+    pub pending_auto_submit: bool,
     /// Connect-a-provider dialog (/connect command).
     pub connect_dialog: DialogSelectState,
     /// Import-config source picker (/import-config command).
@@ -881,6 +894,10 @@ pub struct App {
     pub pr_url: Option<String>,
     /// PR review state: "approved", "changes_requested", "review_required", etc.
     pub pr_state: Option<String>,
+    /// Current working directory path.
+    pub current_dir: Option<String>,
+    /// Current git branch name.
+    pub git_branch: Option<String>,
     /// Count of in-progress background tasks (drives the footer pill).
     pub background_task_count: usize,
     /// Background task status text shown in footer pill.
@@ -965,8 +982,10 @@ pub struct App {
     pub selection_focus: Option<(u16, u16)>,
     /// Text extracted from the current selection (updated each render frame).
     pub selection_text: RefCell<String>,
-    /// When true, releasing a drag selection automatically copies it to clipboard.
-    pub auto_copy_selection: bool,
+    /// Cache of row -> rendered text within the selectable area, refreshed
+    /// each frame. Used by double/triple-click word and paragraph detection
+    /// (issue #149 follow-up: prior word-boundary detection was a placeholder).
+    pub last_row_text: RefCell<std::collections::HashMap<u16, String>>,
 
     // ---- Advanced mouse interaction state --------------------------------
     /// Timestamp of the last left mouse click (for double/triple-click detection).
@@ -1163,9 +1182,6 @@ impl App {
         let config = config;
         let model_name = config.effective_model().to_string();
         let user_keybindings = UserKeybindings::load(&Settings::config_dir());
-        let auto_copy_on_highlight = Settings::load_sync()
-            .map(|s| s.auto_copy_on_highlight)
-            .unwrap_or(false);
         Self {
             config,
             cost_tracker,
@@ -1243,7 +1259,6 @@ impl App {
             stall_start: None,
             settings_screen: SettingsScreen::new(),
             theme_screen: ThemeScreen::new(),
-            privacy_screen: PrivacyScreen::new(),
             stats_dialog: StatsDialogState::new(),
             mcp_view: McpViewState::new(),
             agents_menu: AgentsMenuState::new(),
@@ -1266,7 +1281,9 @@ impl App {
             mcp_approval: McpApprovalDialogState::new(),
             go_to_line_dialog: GoToLineDialog::new(),
             bypass_permissions_dialog: crate::bypass_permissions_dialog::BypassPermissionsDialogState::new(),
+            bypass_permissions_dialog_shown: false,
             onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState::new(),
+            effort_picker: crate::effort_picker::EffortPickerState::new(),
             key_input_dialog: crate::key_input_dialog::KeyInputDialogState::new(),
             custom_provider_dialog: crate::custom_provider_dialog::CustomProviderDialogState::new(),
             free_mode_dialog: crate::free_mode_dialog::FreeModeDialogState::new(),
@@ -1288,6 +1305,8 @@ impl App {
             session_list_pending: false,
             session_list_rx: None,
             auth_store: claurst_core::AuthStore::load(),
+            queued_messages: std::collections::VecDeque::new(),
+            pending_auto_submit: false,
             connect_dialog: DialogSelectState::new("Connect a provider", provider_picker_items()),
             import_config_picker: DialogSelectState::new("Import config", import_config_picker_items()),
             import_config_dialog: ImportConfigDialogState::new(),
@@ -1309,6 +1328,12 @@ impl App {
             pr_number: None,
             pr_url: None,
             pr_state: None,
+            current_dir: std::env::current_dir().ok().and_then(|p| {
+                p.to_str().map(|s| s.to_string())
+            }),
+            git_branch: claurst_core::git_utils::get_repo_root(
+                std::env::current_dir().as_deref().unwrap_or_else(|_| std::path::Path::new("."))
+            ).map(|repo_root| claurst_core::git_utils::get_current_branch(&repo_root)),
             background_task_count: 0,
             background_task_status: None,
             status_line_override: None,
@@ -1367,7 +1392,7 @@ impl App {
             selection_anchor: None,
             selection_focus: None,
             selection_text: RefCell::new(String::new()),
-            auto_copy_selection: auto_copy_on_highlight,
+            last_row_text: RefCell::new(std::collections::HashMap::new()),
             last_click_time: None,
             last_click_position: None,
             click_count: 0,
@@ -1925,10 +1950,6 @@ impl App {
                 self.theme_screen.open(current);
                 true
             }
-            "privacy-settings" | "privacy" => {
-                self.privacy_screen.open();
-                true
-            }
             "stats" => {
                 self.stats_dialog.open();
                 true
@@ -2086,19 +2107,9 @@ impl App {
                 true
             }
             "effort" => {
-                // Only cycle the visual indicator when called with no args (arg-based
-                // effort changes are handled by execute_command + main.rs sync).
-                self.effort_level = match self.effort_level {
-                    EffortLevel::Low => EffortLevel::Normal,
-                    EffortLevel::Normal => EffortLevel::High,
-                    EffortLevel::High => EffortLevel::Max,
-                    EffortLevel::Max => EffortLevel::Low,
-                };
-                self.status_message = Some(format!(
-                    "Effort: {} {}",
-                    self.effort_level.symbol(),
-                    self.effort_level.label(),
-                ));
+                // Open the picker dialog so users can pick an effort level
+                // visually instead of cycling/typing the level (issue #149).
+                self.effort_picker.open(self.effort_level);
                 true
             }
             "voice" => {
@@ -2166,9 +2177,12 @@ impl App {
                 false
             }
             "keybindings" => {
-                // Open settings on KeyBindings tab
-                self.settings_screen.open();
-                self.settings_screen.active_tab = crate::settings_screen::SettingsTab::KeyBindings;
+                // Open the keybindings.json file in the external editor
+                let keybindings_path = claurst_core::config::Settings::config_dir().join("keybindings.json");
+
+                if let Err(e) = open_file_externally(&keybindings_path) {
+                    eprintln!("Failed to open keybindings file: {}", e);
+                }
                 true
             }
             "help" => {
@@ -2207,7 +2221,6 @@ impl App {
         self.device_auth_dialog.close();
         self.settings_screen.close();
         self.theme_screen.close();
-        self.privacy_screen.close();
     }
 
     /// Perform the export based on the selected format. Returns the path written.
@@ -2558,9 +2571,10 @@ impl App {
     }
 
     fn prompt_mode(&self) -> InputMode {
-        if self.is_streaming {
-            InputMode::Readonly
-        } else if self.plan_mode {
+        // Note: previously returned Readonly while streaming, but the prompt
+        // now accepts input during streaming so the user can compose / queue
+        // a follow-up message. Plan mode still wins.
+        if self.plan_mode {
             InputMode::Plan
         } else {
             InputMode::Default
@@ -2821,6 +2835,27 @@ impl App {
                 }
                 KeyCode::Left => {
                     self.onboarding_dialog.prev_page();
+                }
+                _ => {}
+            }
+            return false;
+        }
+
+        // Effort picker dialog (/effort).
+        if self.effort_picker.visible {
+            match key.code {
+                KeyCode::Esc => self.effort_picker.close(),
+                KeyCode::Up | KeyCode::Char('k') => self.effort_picker.select_prev(),
+                KeyCode::Down | KeyCode::Char('j') => self.effort_picker.select_next(),
+                KeyCode::Enter => {
+                    let chosen = self.effort_picker.current();
+                    self.effort_level = chosen;
+                    self.effort_picker.close();
+                    self.status_message = Some(format!(
+                        "Effort set to {} {}.",
+                        chosen.symbol(),
+                        chosen.label()
+                    ));
                 }
                 _ => {}
             }
@@ -3476,11 +3511,6 @@ impl App {
         }
 
         // Privacy screen intercepts keys
-        if self.privacy_screen.visible {
-            crate::privacy_screen::handle_privacy_key(&mut self.privacy_screen, key);
-            return false;
-        }
-
         // Rewind flow overlay intercepts keys first
         if self.rewind_flow.visible {
             return self.handle_rewind_flow_key(key);
@@ -3807,7 +3837,9 @@ impl App {
             }
 
             // ---- Quit / cancel ----------------------------------------
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Accept both 'c' and 'C' so Shift+Ctrl+C also triggers copy
+            // (issue #149 follow-up).
+            KeyCode::Char(c) if (c == 'c' || c == 'C') && key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // If text is selected, copy it to clipboard instead of quitting.
                 let sel_text = self.selection_text.borrow().clone();
                 if self.selection_anchor.is_some() && !sel_text.is_empty() {
@@ -3825,6 +3857,10 @@ impl App {
                     self.streaming_thinking.clear();
                     self.tool_use_blocks.clear();
                     self.status_message = Some("Cancelled.".to_string());
+                } else if !self.prompt_input.is_empty() {
+                    // Non-empty prompt — clear it (matches bash/readline Ctrl+C).
+                    self.prompt_input.clear();
+                    self.refresh_prompt_input();
                 } else {
                     self.should_quit = true;
                 }
@@ -3884,51 +3920,60 @@ impl App {
                 self.help_overlay.toggle();
             }
 
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.prompt_input.kill_line_backward();
                 self.refresh_prompt_input();
             }
-            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.prompt_input.kill_word_backward();
                 self.refresh_prompt_input();
             }
-            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.prompt_input.yank();
                 self.refresh_prompt_input();
             }
 
             // ---- Alt/Meta key text editing operations -------------------
-            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::ALT) && !self.is_streaming => {
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.prompt_input.yank_pop();
                 self.refresh_prompt_input();
             }
-            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) && !self.is_streaming => {
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.prompt_input.delete_word_backward();
                 self.refresh_prompt_input();
             }
-            KeyCode::Delete if key.modifiers.contains(KeyModifiers::ALT) && !self.is_streaming => {
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.prompt_input.delete_word_backward();
+                self.refresh_prompt_input();
+            }
+            KeyCode::Delete if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.prompt_input.delete_word_forward();
                 self.refresh_prompt_input();
             }
-            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) && !self.is_streaming => {
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.prompt_input.move_word_backward();
                 self.sync_legacy_prompt_fields();
             }
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) && !self.is_streaming => {
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.prompt_input.move_word_forward();
                 self.sync_legacy_prompt_fields();
             }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) && !self.is_streaming => {
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.prompt_input.delete_word_at_cursor();
                 self.refresh_prompt_input();
             }
 
-            // ---- Text entry (blocked while streaming) ------------------
-            KeyCode::Char(c) if !self.is_streaming => {
-                // With the kitty keyboard protocol, Shift+letter is reported as the base
-                // (lowercase) key with the SHIFT modifier.  Apply uppercase so the
-                // correct character is inserted.
-                let c = if key.modifiers.contains(KeyModifiers::SHIFT) && c.is_ascii_alphabetic() {
+            // ---- Text entry (allowed while streaming so users can queue
+            // the next message; submission queues via Enter at the CLI layer).
+            KeyCode::Char(c) => {
+                // Crossterm normally delivers the already-shifted character
+                // (e.g. SHIFT+1 → '!'). On terminals that emit the unshifted
+                // key with SHIFT modifier set, we still need to uppercase
+                // ASCII letters so SHIFT+a → 'A'. Don't try to map other
+                // unshifted chars — the layout is locale dependent.
+                let c = if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && c.is_ascii_lowercase()
+                {
                     c.to_ascii_uppercase()
                 } else {
                     c
@@ -3940,27 +3985,39 @@ impl App {
                 }
                 self.refresh_prompt_input();
             }
-            KeyCode::Backspace if !self.is_streaming => {
+            KeyCode::Backspace => {
                 self.prompt_input.backspace();
                 self.refresh_prompt_input();
             }
-            KeyCode::Delete if !self.is_streaming => {
+            KeyCode::Delete if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.prompt_input.delete();
                 self.refresh_prompt_input();
             }
-            KeyCode::Left if !self.is_streaming => {
-                self.prompt_input.move_left();
+            KeyCode::Delete if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.prompt_input.delete_word_forward();
+                self.refresh_prompt_input();
+            }
+            KeyCode::Left => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.prompt_input.move_word_backward();
+                } else {
+                    self.prompt_input.move_left();
+                }
                 self.sync_legacy_prompt_fields();
             }
-            KeyCode::Right if !self.is_streaming => {
-                self.prompt_input.move_right();
+            KeyCode::Right => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.prompt_input.move_word_forward();
+                } else {
+                    self.prompt_input.move_right();
+                }
                 self.sync_legacy_prompt_fields();
             }
-            KeyCode::Home if !self.is_streaming => {
+            KeyCode::Home => {
                 self.prompt_input.cursor = 0;
                 self.sync_legacy_prompt_fields();
             }
-            KeyCode::End if !self.is_streaming => {
+            KeyCode::End => {
                 self.prompt_input.cursor = self.prompt_input.text.len();
                 self.sync_legacy_prompt_fields();
             }
@@ -4000,6 +4057,18 @@ impl App {
             }
 
             // ---- Submit ------------------------------------------------
+            // Shift+Enter / Alt+Enter / Ctrl+Enter insert a literal newline
+            // so users can compose multi-line prompts before sending
+            // (issue #149 follow-up).
+            KeyCode::Enter
+                if !self.is_streaming
+                    && (key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.modifiers.contains(KeyModifiers::ALT)
+                        || key.modifiers.contains(KeyModifiers::CONTROL)) =>
+            {
+                self.prompt_input.insert_newline();
+                self.refresh_prompt_input();
+            }
             KeyCode::Enter if !self.is_streaming => {
                 // If a slash-command suggestion is selected, accept it instead of submitting.
                 if !self.prompt_input.suggestions.is_empty()
@@ -4034,19 +4103,35 @@ impl App {
             }
 
             // ---- Input history navigation ------------------------------
+            // For multi-line / wrapped prompts: Up/Down move the cursor by
+            // one visual row first, only falling through to history recall
+            // when the cursor is already on the first/last visual row
+            // (issue #149 follow-up).
             KeyCode::Up => {
                 if !self.prompt_input.suggestions.is_empty() && self.prompt_input.text.starts_with('/') {
                     self.prompt_input.suggestion_prev();
-                } else if !self.prompt_input.history.is_empty() {
-                    self.prompt_input.history_up();
+                } else {
+                    let area = self.last_input_area.get();
+                    let width = area.width.saturating_sub(4) as usize;
+                    let moved = !self.prompt_input.text.is_empty()
+                        && self.prompt_input.move_visual_up(width);
+                    if !moved && !self.prompt_input.history.is_empty() {
+                        self.prompt_input.history_up();
+                    }
                 }
                 self.refresh_prompt_input();
             }
             KeyCode::Down => {
                 if !self.prompt_input.suggestions.is_empty() && self.prompt_input.text.starts_with('/') {
                     self.prompt_input.suggestion_next();
-                } else if self.prompt_input.history_pos.is_some() {
-                    self.prompt_input.history_down();
+                } else {
+                    let area = self.last_input_area.get();
+                    let width = area.width.saturating_sub(4) as usize;
+                    let moved = !self.prompt_input.text.is_empty()
+                        && self.prompt_input.move_visual_down(width);
+                    if !moved && self.prompt_input.history_pos.is_some() {
+                        self.prompt_input.history_down();
+                    }
                 }
                 self.refresh_prompt_input();
             }
@@ -4068,29 +4153,7 @@ impl App {
             }
 
             // ---- Toggle last thinking block (t key) -------------------
-            KeyCode::Char('t') if !self.is_streaming => {
-                // Find the last thinking block in the message list and toggle it
-                use claurst_core::types::ContentBlock;
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                'outer: for msg in self.messages.iter().rev() {
-                    let blocks = msg.content_blocks();
-                    for block in blocks.iter().rev() {
-                        if let ContentBlock::Thinking { thinking, .. } = block {
-                            let mut h = DefaultHasher::new();
-                            thinking.hash(&mut h);
-                            let hash = h.finish();
-                            if self.thinking_expanded.contains(&hash) {
-                                self.thinking_expanded.remove(&hash);
-                            } else {
-                                self.thinking_expanded.insert(hash);
-                            }
-                            self.invalidate_transcript();
-                            break 'outer;
-                        }
-                    }
-                }
-            }
+            // (Removed: shadowed by KeyCode::Char(c) prompt input handler.)
 
             _ => {}
         }
@@ -4864,21 +4927,78 @@ impl App {
         }
     }
 
-    /// Find word boundaries for the character at (col, row) in the selection text.
-    /// Returns (start_col, end_col) for the word containing the given position.
-    fn find_word_boundaries(&self, col: u16, _row: u16) -> Option<(u16, u16)> {
-        // Get the current selection text to determine word boundaries
-        let text = self.selection_text.borrow();
-        if text.is_empty() {
+    /// Find word boundaries for the character at (col, row) in the rendered
+    /// transcript buffer. Returns absolute (start_col, end_col) for the word
+    /// containing the click. A "word" is a run of non-whitespace characters.
+    fn find_word_boundaries(&self, col: u16, row: u16) -> Option<(u16, u16)> {
+        let cache = self.last_row_text.borrow();
+        let line = cache.get(&row)?;
+        if line.is_empty() {
             return None;
         }
+        let selectable_area = self.last_selectable_area.get();
+        if col < selectable_area.x {
+            return None;
+        }
+        let local = (col - selectable_area.x) as usize;
+        let chars: Vec<char> = line.chars().collect();
+        if local >= chars.len() {
+            return None;
+        }
+        let is_word = |c: char| !c.is_whitespace();
+        if !is_word(chars[local]) {
+            return None;
+        }
+        let mut start = local;
+        while start > 0 && is_word(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = local;
+        while end + 1 < chars.len() && is_word(chars[end + 1]) {
+            end += 1;
+        }
+        Some((selectable_area.x + start as u16, selectable_area.x + end as u16))
+    }
 
-        // For simplicity, we'll find the word based on whitespace and punctuation
-        // In a full implementation, we'd map visual positions back to text offsets
-        // For now, return a reasonable range around the click position
-        let start = col.saturating_sub(10).max(0);
-        let end = col.saturating_add(10);
-        Some((start, end))
+    /// Find paragraph boundaries (run of non-blank rows) around `row` and
+    /// return (start_row, end_row, end_col) where end_col is the trimmed end
+    /// of the last row's content. Used by triple-click selection so a
+    /// "paragraph" — a contiguous block of text rows — is selected as a unit
+    /// instead of a single visual row.
+    fn find_paragraph_boundaries(&self, row: u16) -> Option<(u16, u16, u16)> {
+        let cache = self.last_row_text.borrow();
+        let selectable_area = self.last_selectable_area.get();
+        if selectable_area.width == 0 || selectable_area.height == 0 {
+            return None;
+        }
+        let row_text = cache.get(&row)?;
+        if row_text.trim().is_empty() {
+            return None;
+        }
+        let max_row = selectable_area
+            .y
+            .saturating_add(selectable_area.height)
+            .saturating_sub(1);
+        let mut start = row;
+        while start > selectable_area.y {
+            let prev = start - 1;
+            if cache.get(&prev).map(|s| s.trim().is_empty()).unwrap_or(true) {
+                break;
+            }
+            start = prev;
+        }
+        let mut end = row;
+        while end < max_row {
+            let next = end + 1;
+            if cache.get(&next).map(|s| s.trim().is_empty()).unwrap_or(true) {
+                break;
+            }
+            end = next;
+        }
+        let last_text = cache.get(&end)?;
+        let trimmed = last_text.trim_end();
+        let end_col = selectable_area.x + trimmed.chars().count().saturating_sub(1) as u16;
+        Some((start, end, end_col))
     }
 
     /// Find line boundaries for the row containing the click.
@@ -5403,15 +5523,24 @@ impl App {
                     if self.is_double_click(current_pos) {
                         self.click_count += 1;
                         if self.click_count >= 3 {
-                            // Triple-click: select entire line
-                            self.selection_anchor = Some((selectable_area.x, current_pos.1));
-                            self.selection_focus = Some((
-                                selectable_area
-                                    .x
-                                    .saturating_add(selectable_area.width)
-                                    .saturating_sub(1),
-                                current_pos.1,
-                            ));
+                            // Triple-click: select the paragraph (run of
+                            // non-blank rows) containing the click. Falls back
+                            // to a single line if no paragraph is detected.
+                            if let Some((start_row, end_row, end_col)) =
+                                self.find_paragraph_boundaries(current_pos.1)
+                            {
+                                self.selection_anchor = Some((selectable_area.x, start_row));
+                                self.selection_focus = Some((end_col, end_row));
+                            } else {
+                                self.selection_anchor = Some((selectable_area.x, current_pos.1));
+                                self.selection_focus = Some((
+                                    selectable_area
+                                        .x
+                                        .saturating_add(selectable_area.width)
+                                        .saturating_sub(1),
+                                    current_pos.1,
+                                ));
+                            }
                             self.click_count = 0; // Reset for next click sequence
                         } else {
                             // Double-click: select word
@@ -5459,7 +5588,7 @@ impl App {
                 // Clear if no actual drag (single click = no selection)
                 if self.selection_anchor == self.selection_focus {
                     self.clear_selection();
-                } else if self.auto_copy_selection {
+                } else if self.settings_screen.auto_copy_enabled {
                     // Auto-copy finalized selection to clipboard.
                     let sel_text = self.selection_text.borrow().clone();
                     if !sel_text.is_empty() {
@@ -5952,6 +6081,50 @@ impl App {
         }
 
         self.status_message = Some("No previous errors found.".to_string());
+    }
+}
+
+// Helper function to open a file in the user's external editor
+fn open_file_externally(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Try to open with the system's default application
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(&["/C", "start", ""])
+            .arg(path)
+            .spawn()?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        // Fallback for other systems: try common editors in order
+        for editor in &["nano", "vi", "vim", "emacs"] {
+            match std::process::Command::new(editor)
+                .arg(path)
+                .spawn()
+            {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+        Err("No suitable editor found".into())
     }
 }
 

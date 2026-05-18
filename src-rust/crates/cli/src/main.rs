@@ -1708,10 +1708,13 @@ async fn run_interactive(
 
     // Mirror TS BypassPermissionsModeDialog.tsx startup gate
     // Shown as the highest-priority startup dialog (blocks all other UI).
+    // Only show once per session — subsequent sessions in the same directory
+    // will show the dialog again (not persisted across sessions).
     use claurst_core::config::PermissionMode;
-    if live_config.permission_mode == PermissionMode::BypassPermissions {
+    if live_config.permission_mode == PermissionMode::BypassPermissions && !app.bypass_permissions_dialog_shown {
         app.bypass_permissions_dialog.show();
-    } else {
+        app.bypass_permissions_dialog_shown = true;
+    } else if live_config.permission_mode != PermissionMode::BypassPermissions {
         // Show onboarding only if NOT in bypass-permissions mode.
         // Bypass dialog is a mandatory security gate and takes absolute priority.
         if !has_credentials {
@@ -1908,8 +1911,27 @@ async fn run_interactive(
         terminal.draw(|f| render_app(f, &app))?;
 
         // Poll for crossterm events (keyboard/mouse) with short timeout
-        if crossterm::event::poll(Duration::from_millis(16))? {
-            let evt = event::read()?;
+        // unless an auto-submit (queued message) is pending — in which case
+        // synthesize an Enter event to dequeue and submit it.
+        let synthetic_event: Option<Event> = if app.pending_auto_submit && !app.is_streaming {
+            app.pending_auto_submit = false;
+            Some(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )))
+        } else {
+            None
+        };
+
+        let evt_opt: Option<Event> = if let Some(e) = synthetic_event {
+            Some(e)
+        } else if crossterm::event::poll(Duration::from_millis(16))? {
+            Some(event::read()?)
+        } else {
+            None
+        };
+
+        if let Some(evt) = evt_opt {
             match evt {
                 Event::Key(key) => {
                     // On Windows crossterm emits Press + Release for a single key.
@@ -1930,13 +1952,19 @@ async fn run_interactive(
                             continue;
                         }
 
-                        // No selection — handle as cancel (if streaming) or quit
+                        // No selection — handle as cancel (if streaming) or
+                        // clear-prompt (if non-empty) or quit.
                         if app.is_streaming {
                             if let Some(ref ct) = cancel {
                                 ct.cancel();
                             }
                             app.is_streaming = false;
                             app.status_message = Some("Cancelled.".to_string());
+                            continue;
+                        } else if !app.prompt_input.is_empty() {
+                            // Non-empty prompt — let the app clear it via Ctrl+C
+                            // handler instead of quitting (matches readline).
+                            app.handle_key_event(key);
                             continue;
                         } else {
                             break 'main;
@@ -1967,7 +1995,6 @@ async fn run_interactive(
                         || app.settings_screen.visible
                         || app.export_dialog.visible
                         || app.theme_screen.visible
-                        || app.privacy_screen.visible
                         || app.stats_dialog.open
                         || app.invalid_config_dialog.visible
                         || app.context_viz.visible
@@ -1985,6 +2012,22 @@ async fn run_interactive(
                         || app.context_menu_state.is_some()
                         || app.permission_request.is_some()
                         || app.global_search.open;
+                    if key.code == KeyCode::Enter && app.is_streaming && !any_dialog_open {
+                        // Queue the message: it will auto-submit once the
+                        // current turn finishes (issue #149).
+                        let input = app.take_input();
+                        if !input.is_empty() {
+                            let preview: String = input.chars().take(40).collect();
+                            app.queued_messages.push_back(input);
+                            let total = app.queued_messages.len();
+                            app.notifications.push(
+                                claurst_tui::NotificationKind::Info,
+                                format!("Queued ({}): {}", total, preview),
+                                Some(3),
+                            );
+                        }
+                        continue;
+                    }
                     if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
                         // If a slash-command suggestion is active, accept and execute immediately.
                         if !app.prompt_input.suggestions.is_empty()
@@ -3364,6 +3407,13 @@ async fn run_interactive(
                 session.working_dir = Some(tool_ctx.working_dir.display().to_string());
                 app.is_streaming = false;
                 app.status_message = None;
+                // Drain one queued message into the prompt and request an
+                // auto-submit on the next loop iteration (issue #149).
+                if let Some(next) = app.queued_messages.pop_front() {
+                    app.prompt_input.text = next;
+                    app.prompt_input.cursor = app.prompt_input.text.len();
+                    app.pending_auto_submit = true;
+                }
                 if app.auto_compact_running {
                     app.auto_compact_running = false;
                     // After auto-compact the context was summarised — reset usage.
@@ -3940,4 +3990,3 @@ fn json_null_or_string(opt: &Option<String>) -> serde_json::Value {
         None => serde_json::Value::Null,
     }
 }
-
