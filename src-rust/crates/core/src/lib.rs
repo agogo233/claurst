@@ -70,6 +70,9 @@ pub use ide::{IdeKind, detect_ide};
 pub mod update_check;
 pub use update_check::{check_for_updates, UpdateInfo};
 
+// Self-contained HTML export of a session, used by the `/share` slash command.
+pub mod share_export;
+
 // Re-export commonly used types at the crate root
 pub use error::{ClaudeError, Result};
 pub use types::{
@@ -1555,11 +1558,22 @@ pub mod config {
                     config.skills.urls.push(u.clone());
                 }
             }
-            // Copy file autocomplete and injection settings.
-            config.file_autocomplete_limit = self.file_autocomplete_limit;
-            config.file_autocomplete_show_hidden_files = self.file_autocomplete_show_hidden_files;
-            config.file_injection_enabled = self.file_injection_enabled;
-            config.file_injection_max_size = self.file_injection_max_size;
+            // Copy file autocomplete and injection settings from the top-level Settings
+            // fields, but only when they were explicitly set (differ from their defaults).
+            // If they're at defaults, the nested "config" section value (already in `config`
+            // via the clone above) takes precedence.
+            if self.file_autocomplete_limit != default_file_autocomplete_limit() {
+                config.file_autocomplete_limit = self.file_autocomplete_limit;
+            }
+            if self.file_autocomplete_show_hidden_files {
+                config.file_autocomplete_show_hidden_files = true;
+            }
+            if self.file_injection_enabled != default_true() {
+                config.file_injection_enabled = self.file_injection_enabled;
+            }
+            if self.file_injection_max_size != default_file_injection_max_size() {
+                config.file_injection_max_size = self.file_injection_max_size;
+            }
             config
         }
 
@@ -3493,9 +3507,10 @@ pub mod oauth {
 
     // ---- Production OAuth endpoints & constants ----
 
-    // NOTE: This client ID is registered to Anthropic's official Claude Code CLI.
-    // It will NOT work for Claurst. Users should use an API key from console.anthropic.com.
-    pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"; // Anthropic's — will not work for Claurst
+    // Claude Code client ID, used in stealth-impersonation mode (see
+    // `claurst_core::oauth_config` for the matching request-time headers and
+    // system-prompt prefix wired into `claurst_api::AnthropicClient`).
+    pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
     pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
     pub const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
     pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";

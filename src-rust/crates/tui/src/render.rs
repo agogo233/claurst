@@ -383,6 +383,12 @@ pub fn render_app(frame: &mut Frame, app: &App) {
 
     let prompt_focused =
         !app.is_streaming && app.permission_request.is_none() && !app.history_search_overlay.visible;
+    // Suggestions popup tracks whether the prompt accepts input, not whether
+    // it is the focused widget. Text entry is allowed during streaming so the
+    // user can queue the next message, so the typeahead popup must follow
+    // that same affordance.
+    let suggestions_visible =
+        app.permission_request.is_none() && !app.history_search_overlay.visible;
     let status_visible = should_render_status_row(app);
     // One blank separator row above the status/input area when status is active,
     // matching the visual breathing room in the TS layout.
@@ -404,7 +410,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     } else {
         0
     };
-    let suggestions_height = if prompt_focused && !app.prompt_input.suggestions.is_empty() {
+    let suggestions_height = if suggestions_visible && !app.prompt_input.suggestions.is_empty() {
         app.prompt_input.suggestions.len().min(5) as u16
     } else {
         0
@@ -2271,10 +2277,17 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 if !parts.is_empty() {
                     parts.push(Span::raw("  "));
                 }
-                let display_dir = if dir.starts_with(std::env::var("HOME").as_deref().unwrap_or("")) {
-                    dir.replace(std::env::var("HOME").as_deref().unwrap_or(""), "~")
-                } else {
-                    dir.clone()
+                // Use dirs::home_dir() so this works on Windows (where $HOME
+                // is unset and the home is $USERPROFILE). Guard against an
+                // empty home string: `str::replace("", "~")` inserts "~"
+                // between every character, producing the infamous
+                // `~X~:~\~B~i~g~g~e~r~…` output.
+                let home = dirs::home_dir()
+                    .and_then(|p| p.to_str().map(|s| s.to_string()))
+                    .filter(|s| !s.is_empty());
+                let display_dir = match home {
+                    Some(h) if dir.starts_with(&h) => dir.replacen(&h, "~", 1),
+                    _ => dir.clone(),
                 };
                 parts.push(Span::styled(
                     display_dir,

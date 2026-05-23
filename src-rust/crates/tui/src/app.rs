@@ -70,6 +70,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("insights", "Generate a session analysis report with conversation statistics"),
     ("install-slack-app", "Install the Claurst Slack integration"),
     ("keybindings", "Show keybinding configuration"),
+    ("links", "Open URLs from this session in your browser"),
     ("login", "Log in to Claurst"),
     ("logout", "Log out of Claurst"),
     ("managed-agents", "Configure manager-executor managed agent system"),
@@ -90,6 +91,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("rewind", "Rewind to an earlier turn"),
     ("session", "Browse and manage sessions"),
     ("settings", "Open settings"),
+    ("share", "Upload the current session as a secret gist and get a shareable URL"),
     ("stats", "Open token and cost stats"),
     ("survey", "Open session feedback survey"),
     ("theme", "Open the theme picker"),
@@ -103,7 +105,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
 fn help_command_category(name: &str) -> &'static str {
     match name {
         "connect" | "model" | "providers" | "refresh" | "fast" | "effort" | "voice" => "Model & Provider",
-        "changes" | "diff" | "review" | "rewind" | "export" | "copy" => "Review & History",
+        "changes" | "diff" | "review" | "rewind" | "export" | "copy" | "share" | "links" => "Review & History",
         "stats" | "cost" | "context" | "insights" | "heapdump" | "doctor" => "Diagnostics",
         "config" | "settings" | "theme" | "keybindings" | "hooks" | "mcp" | "import-config" => {
             "Workspace"
@@ -887,6 +889,9 @@ pub struct App {
     /// File injection warning dialog.
     /// Shown when oversized or binary files are detected in @refs.
     pub file_injection_dialog: crate::file_injection_dialog::FileInjectionDialogState,
+    /// When true, the next file injection size check uses limit 0 (no limit),
+    /// letting files that were "allowed" through the warning dialog be injected.
+    pub file_injection_force: bool,
     /// First-launch onboarding welcome dialog.
     pub onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState,
     /// Effort-level picker (/effort with no args).
@@ -1338,6 +1343,7 @@ impl App {
             bypass_permissions_dialog: crate::bypass_permissions_dialog::BypassPermissionsDialogState::new(),
             bypass_permissions_dialog_shown: false,
             file_injection_dialog: crate::file_injection_dialog::FileInjectionDialogState::new(),
+            file_injection_force: false,
             onboarding_dialog: crate::onboarding_dialog::OnboardingDialogState::new(),
             effort_picker: crate::effort_picker::EffortPickerState::new(),
             key_input_dialog: crate::key_input_dialog::KeyInputDialogState::new(),
@@ -2645,9 +2651,16 @@ impl App {
         self.history_index = self.prompt_input.history_pos;
     }
 
-    fn refresh_prompt_input(&mut self) {
+    pub fn refresh_prompt_input(&mut self) {
         self.prompt_input.mode = self.prompt_mode();
-        self.prompt_input.update_suggestions(PROMPT_SLASH_COMMANDS);
+        if self.file_injection_dialog.visible {
+            // Don't update suggestions while the injection dialog is open.
+            self.sync_legacy_prompt_fields();
+            return;
+        }
+        let file_autocomplete_limit = self.config.file_autocomplete_limit;
+        let file_autocomplete_show_hidden = self.config.file_autocomplete_show_hidden_files;
+        self.prompt_input.update_suggestions(PROMPT_SLASH_COMMANDS, file_autocomplete_limit, file_autocomplete_show_hidden);
         self.sync_legacy_prompt_fields();
     }
 
@@ -2880,25 +2893,27 @@ impl App {
 
         // File injection dialog: shown when oversized files are detected in @refs.
         if self.file_injection_dialog.visible {
+            let is_directory_only = self.file_injection_dialog.is_directory_only();
             match key.code {
-                KeyCode::Char('i') | KeyCode::Char('I') => {
-                    self.file_injection_dialog.selected = 0; // InjectAll
-                }
-                KeyCode::Char('s') | KeyCode::Char('S') => {
-                    self.file_injection_dialog.selected = 1; // SkipOversized
-                }
-                KeyCode::Esc => {
-                    self.file_injection_dialog.selected = 2; // Abort
-                    self.file_injection_dialog.confirm();
-                    // Restore input to prompt when aborting
-                    if let Some(input) = &self.file_injection_dialog.pending_input {
-                        self.set_prompt_text(input.clone());
+                KeyCode::Enter => {
+                    if is_directory_only {
+                        // Directories can't be injected; Enter = abort, restore input.
+                        if let Some(input) = self.file_injection_dialog.pending_input.clone() {
+                            self.set_prompt_text(input);
+                        }
+                        self.file_injection_dialog.dismiss();
+                    } else {
+                        // Enter = inject (Allow).
+                        self.file_injection_dialog.selected = 0;
+                        self.file_injection_dialog.confirm();
                     }
                 }
-                KeyCode::Up | KeyCode::Char('k') => self.file_injection_dialog.select_prev(),
-                KeyCode::Down | KeyCode::Char('j') => self.file_injection_dialog.select_next(),
-                KeyCode::Enter => {
-                    self.file_injection_dialog.confirm();
+                KeyCode::Esc => {
+                    // Esc = abort, restore input.
+                    if let Some(input) = self.file_injection_dialog.pending_input.clone() {
+                        self.set_prompt_text(input);
+                    }
+                    self.file_injection_dialog.dismiss();
                 }
                 _ => {}
             }
@@ -3765,9 +3780,11 @@ impl App {
                 KeybindingResult::Action(action) => {
                     return self.handle_keybinding_action(&action);
                 }
-                KeybindingResult::Unbound | KeybindingResult::Pending => return false,
+                KeybindingResult::Pending => return false,
                 KeybindingResult::NoMatch if had_pending_chord => return false,
-                KeybindingResult::NoMatch => {}
+                KeybindingResult::Unbound | KeybindingResult::NoMatch => {
+                    // Fall through to hardcoded keybinding handlers
+                }
             }
         } else {
             self.keybindings.cancel_chord();
@@ -4089,7 +4106,9 @@ impl App {
                 self.refresh_prompt_input();
             }
             KeyCode::Left => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if key.modifiers.contains(KeyModifiers::SUPER) {
+                    self.prompt_input.cursor = 0;
+                } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.prompt_input.move_word_backward();
                 } else {
                     self.prompt_input.move_left();
@@ -4097,7 +4116,9 @@ impl App {
                 self.sync_legacy_prompt_fields();
             }
             KeyCode::Right => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if key.modifiers.contains(KeyModifiers::SUPER) {
+                    self.prompt_input.cursor = self.prompt_input.text.len();
+                } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.prompt_input.move_word_forward();
                 } else {
                     self.prompt_input.move_right();
@@ -4112,15 +4133,17 @@ impl App {
                 self.prompt_input.cursor = self.prompt_input.text.len();
                 self.sync_legacy_prompt_fields();
             }
-            KeyCode::Tab if !self.is_streaming => {
+            KeyCode::Tab => {
                 if !self.prompt_input.suggestions.is_empty() {
-                    // Accept slash-command suggestion
+                    // Accept slash-command suggestion. Allowed while streaming
+                    // so the typeahead popup is interactive even when a turn
+                    // is in flight — Enter then queues the completed command.
                     if self.prompt_input.suggestion_index.is_none() {
                         self.prompt_input.suggestion_index = Some(0);
                     }
                     self.prompt_input.accept_suggestion();
                     self.refresh_prompt_input();
-                } else if self.prompt_input.is_empty() {
+                } else if !self.is_streaming && self.prompt_input.is_empty() {
                     // Cycle agent mode: build → plan → explore → build
                     self.cycle_agent_mode();
                     self.rustle_look_down();
@@ -4161,12 +4184,17 @@ impl App {
                 self.refresh_prompt_input();
             }
             KeyCode::Enter if !self.is_streaming => {
-                // If a slash-command suggestion is selected, accept it instead of submitting.
+                // If a suggestion is selected, accept it instead of submitting.
                 if !self.prompt_input.suggestions.is_empty()
                     && self.prompt_input.suggestion_index.is_some()
-                    && self.prompt_input.text.starts_with('/')
                 {
+                    let is_file_ref = self.prompt_input.suggestions
+                        .get(self.prompt_input.suggestion_index.unwrap())
+                        .map_or(false, |s| s.source == crate::prompt_input::TypeaheadSource::FileRef);
                     self.prompt_input.accept_suggestion();
+                    if is_file_ref {
+                        self.prompt_input.insert_char(' ');
+                    }
                     self.refresh_prompt_input();
                     return false;
                 }
@@ -4199,7 +4227,7 @@ impl App {
             // when the cursor is already on the first/last visual row
             // (issue #149 follow-up).
             KeyCode::Up => {
-                if !self.prompt_input.suggestions.is_empty() && self.prompt_input.text.starts_with('/') {
+                if !self.prompt_input.suggestions.is_empty() && (self.prompt_input.text.starts_with('/') || self.prompt_input.has_active_file_ref()) {
                     self.prompt_input.suggestion_prev();
                 } else {
                     let area = self.last_input_area.get();
@@ -4213,7 +4241,7 @@ impl App {
                 self.refresh_prompt_input();
             }
             KeyCode::Down => {
-                if !self.prompt_input.suggestions.is_empty() && self.prompt_input.text.starts_with('/') {
+                if !self.prompt_input.suggestions.is_empty() && (self.prompt_input.text.starts_with('/') || self.prompt_input.has_active_file_ref()) {
                     self.prompt_input.suggestion_next();
                 } else {
                     let area = self.last_input_area.get();
@@ -4663,29 +4691,53 @@ impl App {
                 self.refresh_global_search();
                 false
             }
-            "submit" => !self.is_streaming,
+            "submit" => {
+                if !self.is_streaming {
+                    if !self.prompt_input.suggestions.is_empty()
+                        && self.prompt_input.suggestion_index.is_some()
+                    {
+                        self.prompt_input.accept_suggestion();
+                        self.refresh_prompt_input();
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            }
             "historyPrev" => {
-                // Slash-command suggestions take priority over history.
+                // Suggestions (slash commands or file refs) take priority over cursor/history.
                 if !self.prompt_input.suggestions.is_empty()
-                    && self.prompt_input.text.starts_with('/')
+                    && (self.prompt_input.text.starts_with('/') || self.prompt_input.has_active_file_ref())
                 {
                     self.prompt_input.suggestion_prev();
                     self.refresh_prompt_input();
-                } else if !self.prompt_input.history.is_empty() {
-                    self.prompt_input.history_up();
+                } else {
+                    let width = self.last_input_area.get().width.saturating_sub(4) as usize;
+                    let moved = !self.prompt_input.text.is_empty()
+                        && self.prompt_input.move_visual_up(width);
+                    if !moved && !self.prompt_input.history.is_empty() {
+                        self.prompt_input.history_up();
+                    }
                     self.refresh_prompt_input();
                 }
                 false
             }
             "historyNext" => {
-                // Slash-command suggestions take priority over history.
+                // Suggestions (slash commands or file refs) take priority over cursor/history.
                 if !self.prompt_input.suggestions.is_empty()
-                    && self.prompt_input.text.starts_with('/')
+                    && (self.prompt_input.text.starts_with('/') || self.prompt_input.has_active_file_ref())
                 {
                     self.prompt_input.suggestion_next();
                     self.refresh_prompt_input();
-                } else if self.prompt_input.history_pos.is_some() {
-                    self.prompt_input.history_down();
+                } else {
+                    let width = self.last_input_area.get().width.saturating_sub(4) as usize;
+                    let moved = !self.prompt_input.text.is_empty()
+                        && self.prompt_input.move_visual_down(width);
+                    if !moved && self.prompt_input.history_pos.is_some() {
+                        self.prompt_input.history_down();
+                    }
                     self.refresh_prompt_input();
                 }
                 false
@@ -4887,10 +4939,6 @@ impl App {
                     self.refresh_prompt_input();
                 }
                 false
-            }
-            "sendMessage" => {
-                // Ctrl+M: Send message (alternative to Enter)
-                !self.is_streaming
             }
             "newline" => {
                 // Shift+Enter: insert a literal newline into the prompt.
@@ -6076,8 +6124,24 @@ impl App {
                 }
             }
 
-            // Draw the frame
-            terminal.draw(|f| render::render_app(f, self))?;
+            // Draw the frame, and immediately scan the *just-rendered*
+            // buffer for URL runs. ratatui swaps its two buffers at the
+            // end of draw(), so by the time draw() returns,
+            // `terminal.current_buffer_mut()` points at the empty next-frame
+            // slot. `CompletedFrame.buffer` is the one we actually want.
+            let osc8_hits = {
+                let completed = terminal.draw(|f| render::render_app(f, self))?;
+                crate::osc8::scan_buffer_for_urls(completed.buffer)
+            };
+
+            // Post-paint OSC 8 overlay: re-emit URL cells wrapped in
+            // hyperlink escapes so terminals that support OSC 8 (Windows
+            // Terminal, iTerm2, WezTerm, Kitty, Konsole, VS Code, …) make
+            // them Ctrl/Cmd-clickable. Failure is non-fatal — we never want
+            // an overlay glitch to kill the TUI.
+            if let Err(err) = crate::osc8::emit_hits(&osc8_hits) {
+                tracing::debug!(target: "osc8", "hyperlink overlay write failed: {err}");
+            }
 
             // Replay a key that was saved by try_detect_paste_burst in a
             // previous iteration (e.g. a modifier key that terminated a burst).
