@@ -25,9 +25,9 @@ jobs:
     outputs:
       version: ${{ steps.get-version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+- uses: actions/checkout@v4.3.1
+  with:
+    fetch-depth: 0
 
       - name: Get version from Cargo.toml
         id: get-version
@@ -75,14 +75,14 @@ jobs:
 
     steps:
       - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
+        uses: Mattraks/delete-workflow-runs@v2.1.0
         with:
           token: ${{ github.token }}
           repository: ${{ github.repository }}
           retain_days: 0
           keep_minimum_runs: 3
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
 
 # Rust 工具链安装（cross 构建使用默认稳定版，无需指定 target）
 # - name: Install Rust toolchain (native)
@@ -101,8 +101,8 @@ jobs:
 #   run: echo "No system dependencies needed (vendored OpenSSL)"
 
       # 缓存
-      - name: Cache cargo registry & build
-        uses: actions/cache@v4
+- name: Cache cargo registry & build
+  uses: actions/cache@v5.0.1
         with:
           path: |
             ~/.cargo/registry
@@ -157,7 +157,7 @@ jobs:
             "dist/${{ matrix.artifact }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2.5.0
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
