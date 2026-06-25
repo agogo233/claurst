@@ -53,6 +53,24 @@ jobs:
   build:
     needs: preflight
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: native-glibc
+            target: x86_64-unknown-linux-gnu
+            method: native
+            artifact: claurst-linux-x86_64-headless-glibc
+          - name: cross-glibc
+            target: x86_64-unknown-linux-gnu
+            method: cross
+            artifact: claurst-linux-x86_64-headless-cross
+          - name: static-musl
+            target: x86_64-unknown-linux-musl
+            method: cross
+            artifact: claurst-linux-x86_64-headless-musl
+    name: Build ${{ matrix.name }}
+
     steps:
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2

@@ -13,7 +13,6 @@ RUN apt-get update && apt-get install --assume-yes --no-install-recommends \
     g++ \
     g++-x86-64-linux-gnu \
     gcc \
-    gfortran-x86-64-linux-gnu \
     git \
     libc6-dev \
     libc6-dev-amd64-cross \
