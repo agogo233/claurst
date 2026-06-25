@@ -1337,6 +1337,8 @@ pub mod config {
                         .find_map(|var| std::env::var(var).ok().filter(|v| !v.is_empty()))
                 })
                 .or_else(|| crate::AuthStore::load().api_key_for(provider_id))
+                // Support {env:VAR_NAME} patterns in the resolved value
+                .map(|key| substitute_env_vars(&key))
         }
 
         pub fn resolve_anthropic_api_key(&self) -> Option<String> {
@@ -1354,6 +1356,8 @@ pub mod config {
                         .iter()
                         .find_map(|var| std::env::var(var).ok().filter(|v| !v.is_empty()))
                 })
+                // Support {env:VAR_NAME} patterns in the resolved value
+                .map(|key| substitute_env_vars(&key))
         }
 
         /// Resolve the API key for the active provider.
@@ -1450,6 +1454,8 @@ pub mod config {
                         .filter(|base| !base.is_empty())
                 })
                 .or_else(|| default_api_base_for_provider(provider_id).map(str::to_owned))
+                // Support {env:VAR_NAME} patterns in the resolved base URL
+                .map(|base| substitute_env_vars(&base))
         }
 
         pub fn resolve_anthropic_api_base(&self) -> String {
@@ -3833,6 +3839,46 @@ pub mod oauth {
             q.append_pair("state", state);
         }
         u.to_string()
+    }
+
+    /// Active OAuth account `(account_uuid, has_premium)` from
+    /// `/api/oauth/profile`. `has_premium` (Claude Max or extra-usage) gates the
+    /// `context-1m` / `mid-conversation-system` betas. Falls back to the token's
+    /// stored `account_uuid` if the profile call fails; `None` if no token.
+    pub async fn current_anthropic_account_meta() -> Option<(String, bool)> {
+        let tokens = OAuthTokens::load().await?;
+        let token = tokens.access_token.clone();
+        let stored_uuid = tokens.account_uuid.clone();
+
+        let fetched = async {
+            let cfg = crate::oauth_config::get_oauth_config();
+            let url = format!("{}/api/oauth/profile", cfg.base_api_url);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .ok()?;
+            let resp = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("anthropic-beta", "oauth-2025-04-20")
+                .header("content-type", "application/json")
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            let v: serde_json::Value = resp.json().await.ok()?;
+            let uuid = v["account"]["uuid"].as_str()?.to_string();
+            let has_max = v["account"]["has_claude_max"].as_bool().unwrap_or(false);
+            let has_extra = v["organization"]["has_extra_usage_enabled"]
+                .as_bool()
+                .unwrap_or(false);
+            Some((uuid, has_max || has_extra))
+        }
+        .await;
+
+        fetched.or_else(|| stored_uuid.map(|u| (u, false)))
     }
 }
 
