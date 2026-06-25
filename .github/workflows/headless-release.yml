@@ -57,14 +57,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: native-glibc
-            target: x86_64-unknown-linux-gnu
-            method: native
-            artifact: claurst-linux-x86_64-headless-glibc
-          - name: cross-glibc
-            target: x86_64-unknown-linux-gnu
-            method: cross
-            artifact: claurst-linux-x86_64-headless-cross
+          # - name: native-glibc
+          #   target: x86_64-unknown-linux-gnu
+          #   method: native
+          #   artifact: claurst-linux-x86_64-headless-glibc
+          #
+          # - name: cross-glibc
+          #   target: x86_64-unknown-linux-gnu
+          #   method: cross
+          #   artifact: claurst-linux-x86_64-headless-cross
+          #
           - name: static-musl
             target: x86_64-unknown-linux-musl
             method: cross
@@ -82,21 +84,21 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      # Rust 工具链安装（按需）
-      - name: Install Rust toolchain (native)
-        if: matrix.method == 'native'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+# Rust 工具链安装（cross 构建使用默认稳定版，无需指定 target）
+# - name: Install Rust toolchain (native)
+#   if: matrix.method == 'native'
+#   uses: dtolnay/rust-toolchain@stable
+#   with:
+#     targets: ${{ matrix.target }}
 
-      - name: Install Rust toolchain (cross)
-        if: matrix.method != 'native'
-        uses: dtolnay/rust-toolchain@stable
+- name: Install Rust toolchain (cross)
+  if: matrix.method != 'native'
+  uses: dtolnay/rust-toolchain@stable
 
-      # 系统依赖（vendored OpenSSL 已内嵌，native 构建无需额外安装）
-      - name: Install system dependencies (native only)
-        if: matrix.method == 'native'
-        run: echo "No system dependencies needed (vendored OpenSSL)"
+# 系统依赖（vendored OpenSSL 已内嵌，native 构建无需额外安装）
+# - name: Install system dependencies (native only)
+#   if: matrix.method == 'native'
+#   run: echo "No system dependencies needed (vendored OpenSSL)"
 
       # 缓存
       - name: Cache cargo registry & build
@@ -114,31 +116,20 @@ jobs:
         if: matrix.method == 'cross'
         run: cargo install cross --git https://github.com/cross-rs/cross.git
 
-      # 创建 Cross.toml 用于 cross 编译
-      - name: Create Cross.toml (cross targets)
-        if: matrix.method == 'cross'
-        working-directory: src-rust
-        run: |
-          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-musl" ]]; then
-            cat > Cross.toml <<EOF
-          [target.x86_64-unknown-linux-musl]
-          image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:edge"
-          EOF
-          else
-            cat > Cross.toml <<EOF
-          [target.x86_64-unknown-linux-gnu]
-          dockerfile = "docker/Dockerfile.x86_64-unknown-linux-gnu"
-          EOF
-          fi
+# 创建 Cross.toml 用于 cross 编译（musl 静态链接）
+- name: Create Cross.toml (cross targets)
+  if: matrix.method == 'cross'
+  working-directory: src-rust
+  run: |
+    cat > Cross.toml <<EOF
+    [target.x86_64-unknown-linux-musl]
+    image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:edge"
+    EOF
 
-      - name: Build headless release binary (no default features)
-        working-directory: src-rust
-        run: |
-          if [[ "${{ matrix.method }}" == "native" ]]; then
-            cargo build --release --package claurst --target ${{ matrix.target }} --no-default-features
-          else
-            cross build --release --package claurst --target ${{ matrix.target }} --no-default-features
-          fi
+- name: Build headless release binary (no default features)
+  working-directory: src-rust
+  run: |
+    cross build --release --package claurst --target ${{ matrix.target }} --no-default-features
 
       # 验证二进制
       - name: Verify binary exists
