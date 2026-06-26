@@ -151,6 +151,9 @@ jobs:
         if: matrix.method == 'native' && matrix.mingw
         shell: msys2 {0}
         working-directory: src-rust
+        env:
+          CC: gcc
+          CXX: g++
         run: cargo build --release --package claurst --target ${{ matrix.target }} --no-default-features
 
       - name: Build headless release (native)
