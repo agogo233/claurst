@@ -104,10 +104,15 @@ jobs:
         shell: pwsh
         run: rustup target add ${{ matrix.target }}
 
-      - name: Install MinGW toolchain
+      - name: Setup MSYS2
         if: matrix.mingw
-        shell: pwsh
-        run: choco install mingw --no-progress -y
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
 
       # 缓存
       - name: Cache cargo registry & build
@@ -161,22 +166,21 @@ jobs:
             exit 1
           fi
 
-      # 打包：Windows → .zip，Linux → 裸二进制
-      - name: Package artifact
+      # 打包：Windows → .zip（pwsh），Linux → 裸二进制
+      - name: Package artifact (zip)
+        if: matrix.archive_ext == '.zip'
+        shell: pwsh
+        run: |
+          mkdir dist -Force
+          Compress-Archive -Path "src-rust/target/${{ matrix.target }}/release/claurst${{ matrix.ext }}" -DestinationPath "dist/${{ matrix.artifact }}.zip"
+
+      - name: Package artifact (bare)
+        if: matrix.archive_ext == ''
         shell: bash
         run: |
           mkdir -p dist
-          case "${{ matrix.archive_ext }}" in
-            .zip)
-              cd "src-rust/target/${{ matrix.target }}/release"
-              zip "$GITHUB_WORKSPACE/dist/${{ matrix.artifact }}.zip" \
-                  "claurst${{ matrix.ext }}"
-              ;;
-            *)
-              cp "src-rust/target/${{ matrix.target }}/release/claurst" \
-                 "dist/${{ matrix.artifact }}"
-              ;;
-          esac
+          cp "src-rust/target/${{ matrix.target }}/release/claurst" \
+             "dist/${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4.6.2
