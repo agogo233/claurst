@@ -79,15 +79,15 @@ fn spinner_char(frame_count: u64) -> char {
     SPINNER[(frame_count as usize) % SPINNER.len()]
 }
 
-/// Returns the colour to use for the streaming spinner.
-/// Turns red when no stream data has arrived for more than 3 seconds.
+/// Returns the colour to use for the streaming spinner: claurst red normally,
+/// brightening to a hot red when no stream data has arrived for over 3 seconds.
 fn spinner_color(app: &App) -> Color {
     if let Some(start) = app.stall_start {
         if start.elapsed() > std::time::Duration::from_secs(3) {
-            return Color::Red;
+            return Color::Rgb(255, 70, 70);
         }
     }
-    Color::Yellow
+    CLAUDE_ORANGE
 }
 
 fn is_modal_open(app: &App) -> bool {
@@ -2198,8 +2198,12 @@ fn should_render_status_row(app: &App) -> bool {
         })
         .unwrap_or(false);
 
+    // Note: a completed turn's "Worked for Xs" summary (`last_turn_elapsed`) is
+    // intentionally NOT a reason to keep the status row on — it stays set until
+    // the next submit, so gating on it pinned the idle spinner glyph on screen
+    // permanently after the first turn. The row now shows only while actually
+    // active (voice, streaming, or an idle status message).
     app.voice_recording
-        || app.last_turn_elapsed.is_some()
         || (!app.is_streaming && app.status_message.is_some())
         || (app.is_streaming && interesting_stream_status)
 }
