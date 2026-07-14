@@ -505,6 +505,23 @@ fn remap_provider_id(id: &str) -> &str {
     }
 }
 
+fn normalize_provider_api(provider_id: &str, api: Option<String>) -> Option<String> {
+    if matches!(
+        provider_id,
+        "minimax" | "minimax-cn" | "minimax-coding-plan" | "minimax-cn-coding-plan"
+    ) {
+        return api.map(|url| {
+            if let Some(base) = url.strip_suffix("/v1") {
+                base.to_owned()
+            } else {
+                url
+            }
+        });
+    }
+
+    api
+}
+
 fn transform_api(api: md::ApiJson) -> ParsedSnapshot {
     let mut out = ParsedSnapshot::default();
 
@@ -516,7 +533,7 @@ fn transform_api(api: md::ApiJson) -> ParsedSnapshot {
             id: pid.clone(),
             name: p.name,
             env: p.env,
-            api: p.api,
+            api: normalize_provider_api(&provider_id, p.api),
             npm: p.npm,
             doc: p.doc,
         });
@@ -1505,7 +1522,7 @@ mod tests {
             "model key must use opencode-zen prefix"
         );
     }
-    // ---- experimental.modes expansion (opencode provider.ts:1247-1264) ----
+// ---- experimental.modes expansion (opencode provider.ts:1247-1264) ----
 
     #[test]
     fn experimental_modes_expand_into_listed_models() {
@@ -1592,6 +1609,22 @@ mod tests {
     #[test]
     fn minimax_targets_preserve_current_metadata() {
         let reg = ModelRegistry::new();
+
+        for (provider_id, expected_api) in [
+            ("minimax", "https://api.minimax.io/anthropic"),
+            ("minimax-cn", "https://api.minimaxi.com/anthropic"),
+            ("minimax-coding-plan", "https://api.minimax.io/anthropic"),
+            (
+                "minimax-cn-coding-plan",
+                "https://api.minimaxi.com/anthropic",
+            ),
+        ] {
+            assert_eq!(
+                reg.provider(provider_id).and_then(|provider| provider.api.as_deref()),
+                Some(expected_api),
+                "{provider_id} must expose the Anthropic base URL without /v1"
+            );
+        }
 
         let m3 = reg
             .get("minimax", "MiniMax-M3")
