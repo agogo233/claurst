@@ -1670,7 +1670,28 @@ mod tests {
             "model key must use opencode-zen prefix"
         );
     }
-// ---- experimental.modes expansion (opencode provider.ts:1247-1264) ----
+#[test]
+    fn minimax_anthropic_api_root_excludes_the_messages_prefix() {
+        let upstream_api = ["https://api.minimax.io/anthropic", "v1"].join("/");
+        let json = serde_json::json!({
+            "minimax": {
+                "id": "minimax",
+                "name": "MiniMax",
+                "api": upstream_api,
+                "models": {}
+            }
+        })
+        .to_string();
+        let parsed = parse_snapshot_str(&json).expect("parse must succeed");
+        let provider = parsed.providers.get("minimax").expect("minimax provider");
+
+        assert_eq!(
+            provider.api.as_deref(),
+            Some("https://api.minimax.io/anthropic")
+        );
+    }
+
+    // ---- experimental.modes expansion (opencode provider.ts:1247-1264) ----
 
     #[test]
     fn experimental_modes_expand_into_listed_models() {
